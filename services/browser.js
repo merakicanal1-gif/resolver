@@ -1,8 +1,8 @@
 import { chromium } from "playwright";
 import { navegarAteProduto } from "./navigator.js";
+import { extrairAmazon } from "./amazon.js";
 
-const BROWSERLESS =
-    "ws://browserless_browserless?token=resolver123";
+const BROWSERLESS = "ws://browserless_browserless?token=resolver123";
 
 export async function abrirPagina(url) {
 
@@ -25,13 +25,25 @@ export async function abrirPagina(url) {
 
     const finalUrl = await navegarAteProduto(page);
 
-    const titulo = await page.title().catch(() => null);
+    let titulo = null;
+    let imagem = null;
+
+    if (finalUrl.includes("amazon.")) {
+
+        // Espera o conteúdo principal aparecer
+        await page.waitForTimeout(3000);
+
+        const dados = await extrairAmazon(page);
+
+        titulo = dados.titulo;
+        imagem = dados.imagem;
+    }
 
     await page.close();
 
     return {
         url: finalUrl,
         titulo,
-        imagem: null
+        imagem
     };
 }
