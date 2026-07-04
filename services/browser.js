@@ -21,45 +21,68 @@ export async function abrirPagina(url) {
 
     const finalUrl = await navegarAteProduto(page);
 
-    // Pequena espera apenas para o HTML terminar de montar
-    await page.waitForTimeout(2000);
+    await page.waitForLoadState("networkidle").catch(() => {});
 
-    const dados = await page.evaluate(() => {
+    if (finalUrl.includes("amazon.")) {
 
-        const meta = (nome) => {
-            return document
-                .querySelector(`meta[property="${nome}"], meta[name="${nome}"]`)
-                ?.content || null;
-        };
+        await page.waitForSelector("#productTitle", {
+            timeout: 15000
+        }).catch(() => {});
 
-        return {
+    }
 
-            titulo:
-                meta("og:title") ||
-                document.title ||
-                null,
+    let titulo = null;
+    let imagem = null;
 
-            imagem:
-    meta("og:image") ||
-    document.querySelector('img[data-old-hires]')?.getAttribute('data-old-hires') ||
-    document.querySelector('#landingImage')?.getAttribute('src') ||
-    document.querySelector('#imgBlkFront')?.getAttribute('src') ||
-    document.querySelector('img')?.getAttribute('src') ||
-    null
+    if (finalUrl.includes("amazon.")) {
 
-        };
+        titulo = await page.locator("#productTitle")
+            .textContent()
+            .catch(() => null);
 
-    });
+        titulo = titulo?.trim() || null;
+
+        imagem =
+            await page.locator("#landingImage")
+            .getAttribute("src")
+            .catch(() => null);
+
+        if (!imagem) {
+
+            imagem =
+                await page.locator("#imgTagWrapperId img")
+                .getAttribute("src")
+                .catch(() => null);
+
+        }
+
+    }
+
+    if (!titulo) {
+
+        titulo =
+            await page.locator('meta[property="og:title"]')
+            .getAttribute("content")
+            .catch(() => null);
+
+    }
+
+    if (!imagem) {
+
+        imagem =
+            await page.locator('meta[property="og:image"]')
+            .getAttribute("content")
+            .catch(() => null);
+
+    }
 
     await browser.close();
 
     return {
 
         url: finalUrl,
-
-        titulo: dados.titulo,
-
-        imagem: dados.imagem
+        titulo,
+        imagem
 
     };
 
