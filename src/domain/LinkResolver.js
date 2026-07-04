@@ -1,61 +1,63 @@
 import NavigationManager from "../core/navigation/NavigationManager.js";
+import logger from "../utils/logger.js";
 
 class LinkResolver {
-  constructor() {
-    this.finalDomains = [
-      "amazon.",
-      "mercadolivre.",
-      "shopee."
-    ];
-  }
-
   /**
-   * Resolve uma URL de afiliado/encurtada até atingir uma URL de domínio final de marketplace.
-   * Rastreia toda a cadeia de redirecionamentos para fins de debug.
-   * @param {import('playwright').Page} page - A página do Playwright a ser utilizada.
-   * @param {string} initialUrl - A URL inicial.
+   * Resolve uma URL seguindo toda a cadeia de redirecionamentos (HTTP, JS, meta refresh, links intermediários).
+   * O resolvedor é totalmente agnóstico em relação aos marketplaces específicos.
+   * @param {import('playwright').Page} page - A página do Playwright utilizada na resolução.
+   * @param {string} initialUrl - A URL de entrada.
+   * @param {string[]} targetDomains - Domínios finais suportados para parada imediata (ex: ['amazon.', 'mercadolivre.']).
    * @returns {Promise<{ urlFinal: string, chain: string[] }>} A URL final resolvida e a cadeia de redirecionamentos.
    */
-  async resolve(page, initialUrl) {
-    console.log(`🔗 Iniciando resolução de link para: ${initialUrl}`);
+  async resolve(page, initialUrl, targetDomains = []) {
+    logger.info(`🔗 Iniciando resolução de link: ${initialUrl}`, { targetDomains });
     
     const chain = [];
-    
-    // Escuta todas as navegações do frame principal para capturar redirects de rede, JS e meta refresh
+    const maxRedirects = 12; // Proteção contra loops infinitos de redirecionamento
+    let currentUrl = initialUrl;
+
+    // Registra cada navegação que altera a URL do frame principal
     const onFrameNavigated = (frame) => {
       if (frame === page.mainFrame()) {
         const url = frame.url();
-        // Evita adicionar duplicados consecutivos na cadeia
-        if (chain.length === 0 || chain[chain.length - 1] !== url) {
-          console.log(`📡 Navegação detectada: ${url}`);
-          chain.push(url);
+        if (url && url !== "about:blank") {
+          // Evita duplicados na cadeia consecutivamente
+          if (chain.length === 0 || chain[chain.length - 1] !== url) {
+            logger.info(`📡 URL alterada na rede: ${url}`);
+            chain.push(url);
+          }
         }
       }
     };
 
     page.on("framenavigated", onFrameNavigated);
 
-    let currentUrl = initialUrl;
-
     try {
-      // Primeira navegação (Aba 1)
-      currentUrl = await NavigationManager.navigateTo(page, initialUrl, {
-        timeout: 20000 // Limite de 20 segundos para a resolução completa
+      // Primeira navegação na Aba 1
+      await page.goto(initialUrl, {
+        waitUntil: "domcontentloaded",
+        timeout: 20000 // 20s de timeout máximo global para a navegação inicial
+      }).catch(err => {
+        logger.warn(`⚠️ Navegação inicial interrompida ou demorada: ${err.message}. Verificando URL alcançada.`);
       });
 
-      // Loop de tentativas para lidar com links intermediários (Pechinchou, Pelando, etc.)
-      for (let attempt = 0; attempt < 10; attempt++) {
-        // Delay inteligente para permitir redirecionamentos assíncronos/meta refresh
+      currentUrl = page.url();
+
+      // Loop de resolução para redirecionamentos intermediários baseados em clique/JS/meta refresh
+      for (let attempt = 0; attempt < maxRedirects; attempt++) {
+        // Aguarda 2 segundos para permitir a execução de redirects assíncronos (JS/meta refresh)
         await NavigationManager.waitForTimeout(page, 2000);
         currentUrl = page.url();
 
-        // Se já alcançamos um domínio final (Amazon, Mercado Livre, Shopee), interrompemos o loop
-        if (this._isFinalDomain(currentUrl)) {
-          console.log(`🎯 Domínio final alcançado: ${currentUrl}`);
+        // 1. Condição de Parada Rápida: se a URL atual contiver um dos domínios alvo (targetDomains)
+        const isTarget = targetDomains.some(domain => currentUrl.toLowerCase().includes(domain.toLowerCase()));
+        if (isTarget) {
+          logger.info(`🎯 URL de destino alvo identificada: ${currentUrl}`);
           break;
         }
 
-        // Se não for um domínio final, busca links (tags <a>) dentro da página que apontem para algum domínio final
+        // 2. Busca links na página que apontem para algum domínio alvo (casos de agregadores como Pechinchou, Pelando)
         const links = await page.locator("a").evaluateAll(elements =>
           elements.map(el => ({
             href: el.href || "",
@@ -63,52 +65,51 @@ class LinkResolver {
           }))
         );
 
+        // Filtra links que apontam para os domínios finais desejados
         const candidateLink = links.find(link =>
-          this.finalDomains.some(domain => link.href.includes(domain))
+          targetDomains.some(domain => link.href.toLowerCase().includes(domain.toLowerCase()))
         );
 
-        if (candidateLink) {
-          console.log(`👉 Seguindo link intermediário candidato: ${candidateLink.href}`);
-          currentUrl = await NavigationManager.navigateTo(page, candidateLink.href, {
+        if (candidateLink && candidateLink.href !== currentUrl) {
+          logger.info(`👉 Seguindo link intermediário candidato: ${candidateLink.href}`);
+          
+          // Navega para o link candidato
+          await page.goto(candidateLink.href, {
+            waitUntil: "domcontentloaded",
             timeout: 10000
+          }).catch(err => {
+            logger.warn(`⚠️ Erro ao seguir link intermediário: ${err.message}. Continuando.`);
           });
+          
+          currentUrl = page.url();
         } else {
-          // Se não há redirecionamento em andamento nem links candidatos nas tags <a>, paramos
+          // Se não há mais redirecionamentos em andamento nem links candidatos a seguir, a navegação estabilizou
+          logger.info(`⏹️ Navegação estabilizou em: ${currentUrl}`);
           break;
         }
       }
     } catch (error) {
-      console.error("❌ Erro durante a resolução de links:", error.message);
+      logger.error("❌ Erro fatal durante a resolução do LinkResolver:", error);
     } finally {
       // Remove o listener para evitar memory leaks
       page.off("framenavigated", onFrameNavigated);
     }
 
-    // Garante que a URL inicial esteja na cadeia
+    // Garante que a URL de entrada original seja sempre o primeiro elemento da cadeia
     if (chain.length === 0 || chain[0] !== initialUrl) {
       chain.unshift(initialUrl);
     }
 
-    console.log(`🏁 Resolução concluída. URL final: ${currentUrl}. Cadeia: [${chain.length} urls]`);
+    // Adiciona a URL final obtida na cadeia caso não esteja listada
+    if (chain[chain.length - 1] !== currentUrl && currentUrl !== "about:blank") {
+      chain.push(currentUrl);
+    }
+
+    logger.info(`🏁 Resolução de link finalizada. URL final: ${currentUrl}`);
     return {
       urlFinal: currentUrl,
       chain
     };
-  }
-
-  /**
-   * Verifica se a URL contém algum dos domínios finais mapeados.
-   * @param {string} url 
-   * @returns {boolean}
-   * @private
-   */
-  _isFinalDomain(url) {
-    try {
-      const hostname = new URL(url).hostname.toLowerCase();
-      return this.finalDomains.some(domain => hostname.includes(domain));
-    } catch {
-      return false;
-    }
   }
 }
 

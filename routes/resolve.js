@@ -4,8 +4,13 @@ import { normalizar } from "../services/normalizer.js";
 import { detectarMarketplace } from "../services/detector.js";
 import { extrairIdProduto } from "../services/extractor.js";
 
+// V2 Imports
+import ResolveLinkUseCase from "../src/use-cases/ResolveLinkUseCase.js";
+import logger from "../src/utils/logger.js";
+
 const router = Router();
 
+// ROTA V1 ORIGINAL (Mantida intacta para migração incremental segura)
 router.post("/", async (req, res) => {
 
     const inicio = Date.now();
@@ -69,6 +74,40 @@ router.post("/", async (req, res) => {
 
     }
 
+});
+
+// ROTA V2 (Nova implementação limpa e robusta)
+router.post("/v2", async (req, res) => {
+    const { url } = req.body;
+
+    if (!url) {
+        return res.status(400).json({
+            success: false,
+            code: "INVALID_URL",
+            message: "URL não enviada."
+        });
+    }
+
+    // Executa a requisição V2 dentro do contexto do Logger (gerando UUID do requestId e metadados)
+    logger.run(async () => {
+        const inicio = Date.now();
+        try {
+            const resultado = await ResolveLinkUseCase.execute(url);
+            
+            res.json({
+                ...resultado,
+                tempo_ms: Date.now() - inicio
+            });
+        } catch (e) {
+            logger.error("❌ Erro não tratado na rota /v2:", e);
+            res.status(500).json({
+                success: false,
+                code: "INTERNAL_ERROR",
+                message: e.message,
+                tempo_ms: Date.now() - inicio
+            });
+        }
+    });
 });
 
 export default router;
