@@ -1,4 +1,4 @@
-FROM node:22-bookworm
+FROM mcr.microsoft.com/playwright:v1.54.2-noble
 
 WORKDIR /app
 
@@ -6,10 +6,10 @@ COPY package*.json ./
 
 RUN npm install
 
-RUN npx playwright install chromium
-
 COPY . .
 
-EXPOSE 3000
+ENV PORT=80
+
+EXPOSE 80
 
 CMD ["npm", "start"]
