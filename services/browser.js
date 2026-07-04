@@ -1,12 +1,11 @@
 import { chromium } from "playwright";
 import { navegarAteProduto } from "./navigator.js";
 import { extrairAmazon } from "./amazon.js";
-
-const BROWSERLESS = "ws://browserless_browserless?token=resolver123";
+import config from "../src/config/index.js";
 
 export async function abrirPagina(url) {
 
-    const browser = await chromium.connectOverCDP(BROWSERLESS);
+    const browser = await chromium.connectOverCDP(config.browserless.wsEndpoint);
 
     let context = browser.contexts()[0];
 

@@ -3,10 +3,15 @@ import dotenv from "dotenv";
 // Carrega o arquivo .env da raiz do projeto
 dotenv.config();
 
+// Validação estrita: O projeto deve falhar na inicialização caso a variável obrigatória não esteja definida
+if (!process.env.BROWSERLESS_WS_ENDPOINT) {
+  throw new Error("❌ Erro crítico de inicialização: A variável de ambiente obrigatória 'BROWSERLESS_WS_ENDPOINT' não está configurada no .env ou nas variáveis do sistema.");
+}
+
 const config = {
   port: parseInt(process.env.PORT || "3000", 10),
   browserless: {
-    wsEndpoint: process.env.BROWSERLESS_WS_ENDPOINT || "ws://browserless_browserless?token=resolver123",
+    wsEndpoint: process.env.BROWSERLESS_WS_ENDPOINT,
   },
   timeouts: {
     // Timeout máximo para toda a cadeia de resolução de links (Aba 1)
