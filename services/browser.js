@@ -1,38 +1,33 @@
 import { chromium } from "playwright";
 import { navegarAteProduto } from "./navigator.js";
 
+const BROWSERLESS =
+    "ws://browserless_browserless?token=resolver123";
+
 export async function abrirPagina(url) {
 
-    console.log("1 - Iniciando");
+    const browser = await chromium.connectOverCDP(BROWSERLESS);
 
-    const browser = await chromium.launch({
-        headless: true
-    });
+    let context = browser.contexts()[0];
 
-    console.log("2 - Browser aberto");
+    if (!context) {
+        context = await browser.newContext({
+            locale: "pt-BR"
+        });
+    }
 
-    const page = await browser.newPage();
-
-    console.log("3 - Nova página");
+    const page = await context.newPage();
 
     await page.goto(url, {
         waitUntil: "domcontentloaded",
         timeout: 60000
     });
 
-    console.log("4 - Página carregada");
-
     const finalUrl = await navegarAteProduto(page);
 
-    console.log("5 - URL:", finalUrl);
+    const titulo = await page.title().catch(() => null);
 
-    const titulo = await page.title();
-
-    console.log("6 - Título:", titulo);
-
-    await browser.close();
-
-    console.log("7 - Finalizado");
+    await page.close();
 
     return {
         url: finalUrl,
