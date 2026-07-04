@@ -11,7 +11,10 @@ export async function abrirPagina(url) {
         viewport: {
             width: 1366,
             height: 768
-        }
+        },
+        locale: "pt-BR",
+        userAgent:
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
     });
 
     await page.goto(url, {
@@ -23,18 +26,14 @@ export async function abrirPagina(url) {
 
     await page.waitForLoadState("networkidle").catch(() => {});
 
-    if (finalUrl.includes("amazon.")) {
-
-        await page.waitForSelector("#productTitle", {
-            timeout: 15000
-        }).catch(() => {});
-
-    }
-
     let titulo = null;
     let imagem = null;
 
     if (finalUrl.includes("amazon.")) {
+
+        await page.waitForSelector("#productTitle", {
+            timeout: 10000
+        }).catch(() => {});
 
         titulo = await page.locator("#productTitle")
             .textContent()
@@ -42,15 +41,13 @@ export async function abrirPagina(url) {
 
         titulo = titulo?.trim() || null;
 
-        imagem =
-            await page.locator("#landingImage")
+        imagem = await page.locator("#landingImage")
             .getAttribute("src")
             .catch(() => null);
 
         if (!imagem) {
 
-            imagem =
-                await page.locator("#imgTagWrapperId img")
+            imagem = await page.locator("#imgTagWrapperId img")
                 .getAttribute("src")
                 .catch(() => null);
 
@@ -60,17 +57,17 @@ export async function abrirPagina(url) {
 
     if (!titulo) {
 
-        titulo =
-            await page.locator('meta[property="og:title"]')
-            .getAttribute("content")
+        titulo = await page.locator("title")
+            .textContent()
             .catch(() => null);
+
+        titulo = titulo?.trim() || null;
 
     }
 
     if (!imagem) {
 
-        imagem =
-            await page.locator('meta[property="og:image"]')
+        imagem = await page.locator('meta[property="og:image"]')
             .getAttribute("content")
             .catch(() => null);
 
@@ -79,11 +76,9 @@ export async function abrirPagina(url) {
     await browser.close();
 
     return {
-
         url: finalUrl,
         titulo,
         imagem
-
     };
 
 }
