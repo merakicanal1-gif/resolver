@@ -6,7 +6,7 @@ dotenv.config();
 const config = {
   port: parseInt(process.env.PORT || "3000", 10),
   browserless: {
-    url: process.env.BROWSERLESS_URL || "ws://browserless_browserless?token=resolver123",
+    wsEndpoint: process.env.BROWSERLESS_WS_ENDPOINT || "ws://browserless_browserless?token=resolver123",
   },
   timeouts: {
     // Timeout máximo para toda a cadeia de resolução de links (Aba 1)

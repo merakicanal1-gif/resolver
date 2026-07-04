@@ -25,8 +25,8 @@ class SessionManager {
 
     this._connectingPromise = (async () => {
       try {
-        console.log(`🔌 Conectando ao Browserless via CDP: ${config.browserless.url}`);
-        const browser = await chromium.connectOverCDP(config.browserless.url);
+        console.log(`🔌 Conectando ao Browserless via CDP: ${config.browserless.wsEndpoint}`);
+        const browser = await chromium.connectOverCDP(config.browserless.wsEndpoint);
         this._browser = browser;
         
         // Listener para logar se a conexão com o browser for perdida
