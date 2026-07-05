@@ -1,11 +1,22 @@
 import ProviderFactory from "./ProviderFactory.js";
 import LifecycleManager from "./LifecycleManager.js";
 import BrowserHealthManager from "./BrowserHealthManager.js";
+import config from "../../config/index.js";
 
 class BrowserManager {
   constructor() {
     // Instancia o provedor de forma única no boot da aplicação
     this._provider = ProviderFactory.getProvider();
+
+    // Logs temporários de auditoria solicitados pelo usuário
+    console.log("--------------------------------------------------");
+    console.log("🚀 [BOOT_LOGS] Auditoria de Inicialização do Browser:");
+    console.log(`- BROWSER_PROVIDER no process.env: ${process.env.BROWSER_PROVIDER || "não definido"}`);
+    console.log(`- BROWSER_PROVIDER no config: ${config.browser.provider}`);
+    console.log(`- CHROME_CDP_URL no process.env: ${process.env.CHROME_CDP_URL || "não definido"}`);
+    console.log(`- BROWSERLESS_WS_ENDPOINT no process.env: ${process.env.BROWSERLESS_WS_ENDPOINT || "não definido"}`);
+    console.log(`- Provedor Escolhido: ${this._provider.constructor.name}`);
+    console.log("--------------------------------------------------");
   }
 
   /**
