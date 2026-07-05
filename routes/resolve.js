@@ -6,6 +6,8 @@ import { extrairIdProduto } from "../services/extractor.js";
 
 // V2 Imports
 import ResolveLinkUseCase from "../src/use-cases/ResolveLinkUseCase.js";
+import BrowserManager from "../src/core/browser/BrowserManager.js";
+import config from "../src/config/index.js";
 import logger from "../src/utils/logger.js";
 
 const router = Router();
@@ -121,6 +123,74 @@ router.post("/v2", async (req, res) => {
             });
         }
     });
+});
+
+// ROTA DE DEBUG/VALIDAÇÃO TEMPORÁRIA DA ETAPA 1
+router.get("/debug/chrome", async (req, res) => {
+    const inicio = Date.now();
+    let browser = null;
+    let context = null;
+    let page = null;
+
+    try {
+        // 1. Conectar ao Chrome
+        browser = await BrowserManager.getBrowser();
+        
+        // 2. Obter contexto persistente
+        context = await BrowserManager.createContext(browser);
+        
+        // 3. Abrir nova Page
+        page = await BrowserManager.createPage(context);
+        
+        // 4. Navegar para o Mercado Livre
+        await page.goto("https://www.mercadolivre.com.br/", {
+            waitUntil: "domcontentloaded",
+            timeout: 20000
+        });
+
+        // 5. Coletar as informações solicitadas
+        const urlFinal = page.url();
+        const title = await page.title();
+
+        // Verifica autenticação com seletores comuns do Mercado Livre logado
+        const usernameSelectorExists = await page.$(".nav-header-username").then(el => !!el);
+        const userMenuExists = await page.$(".nav-header-user-menu").then(el => !!el);
+        const authenticated = usernameSelectorExists || userMenuExists;
+
+        const capabilities = BrowserManager.provider.capabilities;
+        const browserVersion = await browser.version();
+        const contextsCount = browser.contexts().length;
+        const pagesCount = context.pages().length;
+
+        const elapsedMs = Date.now() - inicio;
+
+        res.json({
+            success: true,
+            provider: config.browser.provider,
+            browserVersion,
+            contexts: contextsCount,
+            pages: pagesCount,
+            url: urlFinal,
+            title,
+            authenticated,
+            persistentContext: capabilities.supportsPersistentContext,
+            elapsedMs
+        });
+
+    } catch (e) {
+        res.status(500).json({
+            success: false,
+            error: e.message,
+            stack: e.stack,
+            elapsedMs: Date.now() - inicio
+        });
+    } finally {
+        // 8. Fechar apenas a aba criada
+        if (page) {
+            await BrowserManager.closePage(page).catch(() => {});
+        }
+        // NUNCA fechar browser ou contexto persistente do Chrome
+    }
 });
 
 export default router;
