@@ -207,108 +207,106 @@ class ResolveLinkUseCase {
           timeout: config.timeouts.extraction
         });
 
-        // Se for uma página intermediária (sem ID do produto), tentamos localizar o link do produto nela
+        // Se for uma página intermediária (sem ID do produto), tentamos localizar e CLICAR no produto
         if (!productIds.produto_id) {
           logger.info(`[ResolveLinkUseCase] Identificada página intermediária para ${marketplace}. Aguardando renderização do conteúdo...`);
-          
+
           if (marketplace === "mercadolivre") {
-            await page2.waitForSelector(".ui-search-layout, .ui-search-results, .ui-search-link, a", { timeout: 5000 }).catch(() => {});
-          } else if (marketplace === "amazon") {
-            await page2.waitForSelector("#search, .s-search-results, .s-result-item", { timeout: 5000 }).catch(() => {});
-          } else if (marketplace === "shopee") {
-            await page2.waitForSelector(".shopee-search-item-result, .search-item-list", { timeout: 5000 }).catch(() => {});
-          }
+            // Aguarda a listagem de resultados aparecer
+            await page2.waitForSelector(
+              ".ui-search-layout__item, .ui-search-result, .poly-card, .ui-search-link",
+              { timeout: 8000 }
+            ).catch(() => {});
 
-          // Folga de estabilização pós-render
-          await page2.waitForTimeout(1500);
+            // Folga extra para renderização completa dos cards
+            await page2.waitForTimeout(2000);
 
-          logger.info(`[ResolveLinkUseCase] Buscando link de produto individual...`);
-          
-          const linkCandidato = await page2.evaluate((mkt) => {
-            const anchors = Array.from(document.querySelectorAll("a"));
+            logger.info(`[ResolveLinkUseCase] Localizando e clicando no primeiro produto da listagem...`);
 
-            if (mkt === "mercadolivre") {
-              // Estratégia 1: link direto para produto.mercadolivre.com.br ou /p/MLB
-              const produtoLink = anchors.find(a => {
-                try {
-                  const u = new URL(a.href);
-                  return u.hostname === "produto.mercadolivre.com.br" || u.pathname.startsWith("/p/MLB");
-                } catch(e) { return false; }
+            // Tenta vários seletores do primeiro card de produto (da mais específica para mais genérica)
+            const primeiroCardSeletor = [
+              ".ui-search-layout__item:first-of-type .poly-component__title",
+              ".ui-search-layout__item:first-of-type .ui-search-item__title",
+              ".ui-search-result:first-of-type .ui-search-item__title",
+              ".poly-card:first-of-type .poly-component__title",
+              ".ui-search-layout__item:first-of-type a.ui-search-link",
+              ".ui-search-layout__item:first-of-type a",
+            ].join(", ");
+
+            const elemento = await page2.$(primeiroCardSeletor);
+
+            if (elemento) {
+              // Rola a página levemente, como um humano faria ao ver a listagem
+              await page2.evaluate(() => window.scrollBy(0, 300));
+              await page2.waitForTimeout(800 + Math.floor(Math.random() * 600));
+
+              // Clica no primeiro produto e aguarda a navegação para a página do produto
+              await Promise.all([
+                page2.waitForNavigation({ waitUntil: "domcontentloaded", timeout: config.timeouts.extraction }),
+                elemento.click(),
+              ]);
+
+              // Aguarda a página do produto estabilizar antes de prosseguir
+              await page2.waitForTimeout(1500);
+              logger.info(`[ResolveLinkUseCase] Navegação após clique concluída. URL: ${page2.url()}`);
+            } else {
+              // Fallback: não encontrou elemento clicável, tenta via href direto
+              logger.warn(`[ResolveLinkUseCase] Elemento clicável não encontrado. Tentando via href...`);
+              const href = await page2.evaluate(() => {
+                const anchors = Array.from(document.querySelectorAll("a"));
+                const direct = anchors.find(a => {
+                  try {
+                    const u = new URL(a.href);
+                    return u.hostname === "produto.mercadolivre.com.br" || u.pathname.startsWith("/p/MLB");
+                  } catch(e) { return false; }
+                });
+                if (direct) return direct.href;
+                const byPath = anchors.find(a => {
+                  try {
+                    const u = new URL(a.href);
+                    return /\/MLB-\d+/.test(u.pathname) && !u.pathname.includes("/pagina/");
+                  } catch(e) { return false; }
+                });
+                return byPath ? byPath.href : null;
               });
-              if (produtoLink) return produtoLink.href;
 
-              // Estratégia 2: link de click-tracker com urldest decodificado apontando para produto
-              const clickLink = anchors.find(a => {
-                if (!a.href.includes("urldest=")) return false;
-                try {
-                  const urlObj = new URL(a.href);
-                  const dest = urlObj.searchParams.get("urldest");
-                  if (!dest) return false;
-                  let decoded = decodeURIComponent(dest);
-                  if (decoded.includes("%")) decoded = decodeURIComponent(decoded);
-                  const du = new URL(decoded);
-                  return du.hostname === "produto.mercadolivre.com.br" || du.pathname.startsWith("/p/MLB");
-                } catch(e) { return false; }
-              });
-              if (clickLink) {
-                try {
-                  const urlObj = new URL(clickLink.href);
-                  const dest = urlObj.searchParams.get("urldest");
-                  let decoded = decodeURIComponent(dest);
-                  if (decoded.includes("%")) decoded = decodeURIComponent(decoded);
-                  return decoded;
-                } catch(e) {}
+              if (href) {
+                await page2.goto(href, { waitUntil: "domcontentloaded", timeout: config.timeouts.extraction });
+                logger.info(`[ResolveLinkUseCase] Navegação via goto concluída. URL: ${page2.url()}`);
+              } else {
+                logger.warn(`[ResolveLinkUseCase] Nenhum link de produto encontrado na página intermediária.`);
               }
-
-              // Estratégia 3: primeiro card de resultado de busca (título clicável)
-              const cardTitle = document.querySelector(".ui-search-item__title, .poly-component__title");
-              if (cardTitle) {
-                const anchor = cardTitle.closest("a") || cardTitle.querySelector("a") || cardTitle.parentElement?.closest("a");
-                if (anchor && anchor.href) return anchor.href;
-              }
-
-              // Estratégia 4: qualquer link com /MLB-DIGITS no path (excluindo páginas de loja /pagina/)
-              const mlbPathLink = anchors.find(a => {
-                try {
-                  const u = new URL(a.href);
-                  return /\/MLB-\d+/.test(u.pathname) && !u.pathname.includes("/pagina/");
-                } catch(e) { return false; }
-              });
-              return mlbPathLink ? mlbPathLink.href : null;
             }
 
-            if (mkt === "amazon") {
-              const found = anchors.find(a => {
-                const href = a.href || "";
-                return href.includes("/dp/") || href.includes("/gp/product/");
-              });
-              return found ? found.href : null;
-            }
-
-            if (mkt === "shopee") {
-              const found = anchors.find(a => {
-                const href = a.href || "";
-                return href.includes("-i.") || href.includes("/product/");
-              });
-              return found ? found.href : null;
-            }
-
-            return null;
-          }, marketplace);
-
-          if (linkCandidato) {
-            logger.info(`[ResolveLinkUseCase] Link do produto encontrado na página intermediária: ${linkCandidato}. Navegando...`);
-            await page2.goto(linkCandidato, {
-              waitUntil: "domcontentloaded",
-              timeout: config.timeouts.extraction
-            });
-            
-            // Re-extrai IDs e normaliza a URL a partir do novo destino
+            // Re-extrai IDs e normaliza URL após navegação para o produto
             const novaUrl = page2.url();
             urlLimpa = extractor.normalizeUrl(novaUrl);
             productIds = extractor.extractProductId(urlLimpa);
+
           } else {
-            logger.warn(`[ResolveLinkUseCase] Nenhum link de produto correspondente encontrado na página intermediária.`);
+            // Para Amazon e Shopee: estratégia via href
+            const linkCandidato = await page2.evaluate((mkt) => {
+              const anchors = Array.from(document.querySelectorAll("a"));
+              if (mkt === "amazon") {
+                const found = anchors.find(a => a.href.includes("/dp/") || a.href.includes("/gp/product/"));
+                return found ? found.href : null;
+              }
+              if (mkt === "shopee") {
+                const found = anchors.find(a => a.href.includes("-i.") || a.href.includes("/product/"));
+                return found ? found.href : null;
+              }
+              return null;
+            }, marketplace);
+
+            if (linkCandidato) {
+              logger.info(`[ResolveLinkUseCase] Link do produto encontrado: ${linkCandidato}. Navegando...`);
+              await page2.goto(linkCandidato, { waitUntil: "domcontentloaded", timeout: config.timeouts.extraction });
+              const novaUrl = page2.url();
+              urlLimpa = extractor.normalizeUrl(novaUrl);
+              productIds = extractor.extractProductId(urlLimpa);
+            } else {
+              logger.warn(`[ResolveLinkUseCase] Nenhum link de produto encontrado na página intermediária.`);
+            }
           }
         }
 
