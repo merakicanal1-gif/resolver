@@ -7,11 +7,6 @@ import logger from "../utils/logger.js";
 import config from "../config/index.js";
 
 class ResolveLinkUseCase {
-  constructor() {
-    // Definimos os domínios finais mapeados que o LinkResolver usará para parada imediata
-    this.targetDomains = ["amazon.", "mercadolivre.", "shopee."];
-  }
-
   /**
    * Executa o caso de uso de resolução de link em duas etapas isoladas.
    * @param {string} rawUrl - A URL enviada pelo cliente.
@@ -45,7 +40,7 @@ class ResolveLinkUseCase {
       const page1Setup = await BrowserManager.createPage(context);
       page1 = page1Setup.page;
 
-      const resolution = await LinkResolver.resolve(page1, rawUrl, this.targetDomains);
+      const resolution = await LinkResolver.resolve(page1, rawUrl);
       urlFinal = resolution.urlFinal;
       redirectChain = resolution.chain;
 
