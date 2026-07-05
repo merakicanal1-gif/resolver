@@ -43,25 +43,25 @@ class LinkResolver {
 
       currentUrl = page.url();
 
-      // Loop de estabilização: monitora se a URL do navegador mudou nos segundos seguintes.
-      // Se a URL permanecer a mesma por 3 segundos seguidos, consideramos que a cadeia automática terminou.
-      let lastUrl = currentUrl;
+      // Loop de estabilização: monitora se a cadeia de redirecionamentos (chain) parou de crescer.
+      // Se o tamanho da cadeia não aumentar por 3 segundos seguidos, a navegação é dada como estabilizada.
+      let lastChainLength = chain.length;
       let stableSeconds = 0;
       const maxCheckSeconds = 15;
 
       for (let i = 0; i < maxCheckSeconds; i++) {
         await page.waitForTimeout(1000);
-        currentUrl = page.url();
+        const currentChainLength = chain.length;
 
-        if (currentUrl === lastUrl && currentUrl !== "about:blank") {
+        if (currentChainLength === lastChainLength) {
           stableSeconds++;
           if (stableSeconds >= 3) {
-            logger.info(`⏹️ Navegação estabilizou de forma agnóstica em: ${currentUrl}`);
+            logger.info(`⏹️ Cadeia de navegação estabilizou de forma agnóstica em: ${page.url()}`);
             break;
           }
         } else {
           stableSeconds = 0;
-          lastUrl = currentUrl;
+          lastChainLength = currentChainLength;
         }
       }
     } catch (error) {

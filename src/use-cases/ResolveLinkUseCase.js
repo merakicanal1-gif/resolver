@@ -6,6 +6,7 @@ import ExtractorRegistry from "../market-extractors/ExtractorRegistry.js";
 import NavigationManager from "../core/navigation/NavigationManager.js";
 import logger from "../utils/logger.js";
 import config from "../config/index.js";
+import DiagnosticManager from "../utils/DiagnosticManager.js";
 
 class ResolveLinkUseCase {
   /**
@@ -149,19 +150,64 @@ class ResolveLinkUseCase {
       const page2Setup = await BrowserManager.createPage(context);
       page2 = page2Setup.page;
 
-      logger.info(`[EXTRACAO_INICIADA] Carregando URL do produto limpo na aba 2...`);
-      await NavigationManager.navigateTo(page2, urlLimpa, {
-        timeout: config.timeouts.extraction
+      let requestHeaders = {};
+      let responseHeaders = {};
+
+      // Captura de cabeçalhos de requisição e resposta do produto
+      page2.on("request", (req) => {
+        if (req.url() === urlLimpa) {
+          requestHeaders = req.headers();
+        }
       });
 
-      // Executa a raspagem
-      const metadata = await extractor.extract(page2);
+      page2.on("response", (res) => {
+        if (res.url() === urlLimpa) {
+          responseHeaders = res.headers();
+        }
+      });
+
+      let metadata = { titulo: null, imagem: null };
+      let extractionError = null;
+
+      try {
+        logger.info(`[EXTRACAO_INICIADA] Carregando URL do produto limpo na aba 2...`);
+        await NavigationManager.navigateTo(page2, urlLimpa, {
+          timeout: config.timeouts.extraction
+        });
+
+        metadata = await extractor.extract(page2);
+      } catch (err) {
+        extractionError = err;
+        logger.error(`❌ [ERRO_EXTRACAO] Falha ao carregar ou raspar dados na aba 2: ${err.message}`);
+      }
+
       logger.endStep("metadata_extraction");
-      logger.info(`[EXTRACAO_CONCLUIDA] Extração realizada com sucesso.`);
+
+      // Se a extração falhar por erro, ou se retornar dados incompletos, executa o salvamento de diagnóstico
+      if (extractionError || !metadata.titulo || !metadata.imagem) {
+        logger.warn(`⚠️ [DIAGNOSTICO_ATIVADO] Ativando salvamento de logs de debug para o marketplace: ${marketplace}`);
+        const contextStore = logger.requestStorage?.getStore();
+        const requestId = contextStore ? contextStore.requestId : "unknown-request";
+
+        await DiagnosticManager.saveFailure(page2, requestId, {
+          urlOriginal: rawUrl,
+          urlFinal,
+          marketplace,
+          chain: redirectChain,
+          requestHeaders,
+          responseHeaders,
+          error: extractionError ? extractionError.message : `Metadados nulos (titulo=${metadata.titulo}, imagem=${metadata.imagem})`
+        });
+      }
 
       // Fecha a Aba 2
       await BrowserManager.closePage(page2);
       page2 = null;
+
+      // Se houve erro na extração (como timeout), relança para o retry tratar
+      if (extractionError) {
+        throw extractionError;
+      }
 
       // 6. Retorna a estrutura final de sucesso
       return {
