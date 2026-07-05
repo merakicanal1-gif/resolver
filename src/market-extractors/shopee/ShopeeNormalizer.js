@@ -1,3 +1,5 @@
+import ShopeeExtractor from "./ShopeeExtractor.js";
+
 class ShopeeNormalizer {
   /**
    * Limpa a URL da Shopee.
@@ -5,14 +7,7 @@ class ShopeeNormalizer {
    * @returns {string} URL limpa.
    */
   normalize(url) {
-    try {
-      const u = new URL(url);
-      u.search = "";
-      u.hash = "";
-      return u.toString();
-    } catch {
-      return url;
-    }
+    return ShopeeExtractor.normalizeUrl(url);
   }
 
   /**
@@ -21,20 +16,11 @@ class ShopeeNormalizer {
    * @returns {object} { marketplace: 'shopee', shop_id: string, produto_id: string } ou {}
    */
   extractId(url) {
-    try {
-      const u = new URL(url);
-      const match = u.pathname.match(/i\.(\d+)\.(\d+)/);
-      if (match) {
-        return {
-          marketplace: "shopee",
-          shop_id: match[1],
-          produto_id: match[2]
-        };
-      }
-      return {};
-    } catch {
-      return {};
+    const result = ShopeeExtractor.extractProductId(url);
+    if (result.produto_id) {
+      return result;
     }
+    return {};
   }
 }
 

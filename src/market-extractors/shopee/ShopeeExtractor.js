@@ -1,5 +1,6 @@
 import BaseExtractor from "../base/BaseExtractor.js";
-import NavigationManager from "../../core/navigation/NavigationManager.js";
+import { ExtractorError } from "../base/ExtractorError.js";
+import config from "../../config/index.js";
 import logger from "../../utils/logger.js";
 
 class ShopeeExtractor extends BaseExtractor {
@@ -7,6 +8,7 @@ class ShopeeExtractor extends BaseExtractor {
     super();
     this.marketplace = "shopee";
     this.supportedDomains = ["shopee.com.br", "shopee.com", "shope.ee"];
+    this.mandatoryFields = ["titulo", "imagem"];
   }
 
   supports(url) {
@@ -60,110 +62,71 @@ class ShopeeExtractor extends BaseExtractor {
     }
   }
 
-  async extract(page, urlFinal) {
-    logger.info("🕵️ [ShopeeExtractor] Iniciando extração de dados da Shopee...");
-
-    // Espera inteligente por metadados de título ou h1
-    const carregou = await NavigationManager.waitForSelector(page, 'meta[property="og:title"], h1', { timeout: 10000 });
-    
-    if (!carregou) {
-      logger.warn("⚠️ [ShopeeExtractor] Seletor og:title ou h1 não apareceu na Shopee.");
+  async resolveInternalNavigation(page, url, decisionTree) {
+    if (config.diagnostics.logLevel === "debug") {
+      decisionTree.push("resolveInternalNavigation: Procurando link de produto da Shopee no DOM");
     }
 
-    let titulo = null;
-    let imagem = null;
-    let preco = null;
-    let vendedor = null;
-    let avaliacao = null;
+    const productLink = await page.evaluate(() => {
+      const anchors = Array.from(document.querySelectorAll("a"));
+      for (const a of anchors) {
+        try {
+          const href = a.href;
+          const u = new URL(href);
+          if (/\/product\/\d+\/\d+/.test(u.pathname) || /i\.\d+\.\d+/.test(u.pathname)) {
+            return href;
+          }
+        } catch (e) {}
+      }
+      return null;
+    }).catch(() => null);
 
-    try {
-      // 1. Título
+    if (productLink) {
+      if (config.diagnostics.logLevel === "debug") {
+        decisionTree.push(`Navegação Interna: Link de produto Shopee encontrado no DOM. Navegando para: ${productLink}`);
+      }
+      await page.goto(productLink, { waitUntil: "domcontentloaded", timeout: config.timeouts.extraction });
+      return { strategy: "HrefDomScan" };
+    }
+
+    if (config.diagnostics.logLevel === "debug") {
+      decisionTree.push("resolveInternalNavigation: Nenhuma estratégia de navegação interna funcionou.");
+    }
+    return null;
+  }
+
+  async extractDomFallback(page) {
+    let titulo = await page.locator("h1").first().textContent().catch(() => null);
+    if (titulo) {
+      titulo = titulo.trim().replace(/\s*\|\s*Shopee\s*Brasil$/i, "");
+    }
+
+    if (!titulo) {
       titulo = await page.locator('meta[property="og:title"]').getAttribute("content").catch(() => null);
-      
-      if (!titulo) {
-        titulo = await page.locator("h1").first().textContent().catch(() => null);
-      }
-
-      if (!titulo) {
-        titulo = await page.title().catch(() => null);
-      }
-
       if (titulo) {
         titulo = titulo.trim().replace(/\s*\|\s*Shopee\s*Brasil$/i, "");
       }
-
-      // 2. Imagem
-      imagem = await page.locator('meta[property="og:image"]').getAttribute("content").catch(() => null);
-
-      if (!imagem || imagem.startsWith("data:")) {
-        imagem = await page.locator('meta[name="twitter:image"]').getAttribute("content").catch(() => null);
-      }
-
-      if (!imagem) {
-        imagem = await page.locator("img").evaluateAll(imgs => {
-          const productImg = imgs.find(img => {
-            const src = img.src || "";
-            return src.includes("cf.shopee.com.br") || src.includes("down-br.img.susercontent.com");
-          });
-          return productImg ? productImg.src : null;
-        }).catch(() => null);
-      }
-
-      if (imagem) imagem = imagem.trim();
-
-      // 3. Preço (tenta ler tags de metadados ou classes do DOM)
-      preco = await page.locator('meta[property="product:price:amount"]').getAttribute("content").catch(() => null);
-      if (preco) {
-        const currency = await page.locator('meta[property="product:price:currency"]').getAttribute("content").catch(() => "BRL");
-        preco = `${currency === "BRL" ? "R$" : currency} ${preco.trim()}`;
-      } else {
-        // Fallback para elementos de preço visíveis na Shopee
-        preco = await page.locator("div.pm52zq").first().textContent().catch(() => null);
-        if (preco) preco = preco.trim();
-      }
-
-      // 4. Vendedor
-      vendedor = await page.locator(".shopee-seller-portrait__name").first().textContent().catch(() => null);
-      if (vendedor) {
-        vendedor = vendedor.trim();
-      }
-
-      // 5. Avaliação
-      // Tenta achar estrelas ou reviews no DOM
-      avaliacao = await page.locator(".shopee-product-rating").first().textContent().catch(() => null);
-      if (avaliacao) {
-        avaliacao = avaliacao.trim();
-      }
-
-      const { produto_id } = this.extractProductId(urlFinal);
-      const urlLimpa = this.normalizeUrl(urlFinal);
-
-      const result = {
-        marketplace: this.marketplace,
-        produto_id,
-        titulo,
-        imagem,
-        preco,
-        vendedor,
-        avaliacao,
-        url_final: urlLimpa
-      };
-
-      logger.info(`✅ [ShopeeExtractor] Extração concluída com sucesso`, { titulo, produto_id });
-      return result;
-    } catch (error) {
-      logger.error("❌ [ShopeeExtractor] Erro ao extrair dados na Shopee:", error);
-      return {
-        marketplace: this.marketplace,
-        produto_id: this.extractProductId(urlFinal).produto_id,
-        titulo: null,
-        imagem: null,
-        preco: null,
-        vendedor: null,
-        avaliacao: null,
-        url_final: this.normalizeUrl(urlFinal)
-      };
     }
+
+    let imagem = await page.locator("img").evaluateAll(imgs => {
+      const productImg = imgs.find(img => {
+        const src = img.src || "";
+        return src.includes("cf.shopee.com.br") || src.includes("down-br.img.susercontent.com");
+      });
+      return productImg ? productImg.src : null;
+    }).catch(() => null);
+    if (imagem) imagem = imagem.trim();
+
+    let preco = await page.locator("div.pm52zq").first().textContent().catch(() => null);
+    if (preco) preco = preco.trim();
+
+    let vendedor = await page.locator(".shopee-seller-portrait__name").first().textContent().catch(() => null);
+    if (vendedor) vendedor = vendedor.trim();
+
+    let avaliacao = await page.locator(".shopee-product-rating").first().textContent().catch(() => null);
+    if (avaliacao) avaliacao = avaliacao.trim();
+
+    return { titulo, imagem, preco, vendedor, avaliacao };
   }
 }
 

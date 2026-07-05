@@ -24,9 +24,10 @@ class ResolveLinkUseCase {
     const startTotalTime = Date.now();
     logger.startStep("total_execution");
     
-    // Log inicial humanizado
-    console.log("Request iniciado");
-    console.log("↓");
+    if (config.diagnostics.logLevel === "debug") {
+      console.log("Request iniciado");
+      console.log("↓");
+    }
     logger.structured("total_execution", "request_initiated", { url: rawUrl });
 
     try {
@@ -44,8 +45,10 @@ class ResolveLinkUseCase {
         await SessionManager.forceRecreate().catch(() => {});
         
         try {
-          console.log("Reconectando navegador...");
-          console.log("↓");
+          if (config.diagnostics.logLevel === "debug") {
+            console.log("Reconectando navegador...");
+            console.log("↓");
+          }
           return await this._runPipeline(rawUrl, startTotalTime);
         } catch (retryError) {
           logger.error("❌ [ResolveLinkUseCase] Erro crítico persistente após retry:", retryError);
@@ -92,8 +95,10 @@ class ResolveLinkUseCase {
       context = await BrowserManager.createContext();
       
       const providerName = config.browser.provider === "chrome" ? "Chrome" : "Browserless";
-      console.log(`${providerName} conectado`);
-      console.log("↓");
+      if (config.diagnostics.logLevel === "debug") {
+        console.log(`${providerName} conectado`);
+        console.log("↓");
+      }
       
       tempoConexaoMs = Date.now() - startConnect;
       logger.structured("initialization", "browser_connected", { provider: config.browser.provider });
@@ -104,16 +109,20 @@ class ResolveLinkUseCase {
       logger.startStep("link_resolution");
       page1 = await BrowserManager.createPage(context);
       
-      console.log("Nova URL");
-      console.log("↓");
+      if (config.diagnostics.logLevel === "debug") {
+        console.log("Nova URL");
+        console.log("↓");
+      }
 
-      // Escuta eventos e imprime logs humanizados específicos da Fase 1
+      // Escuta eventos e imprime logs específicos da Fase 1
       page1.on("request", (req) => {
         if (req.isNavigationRequest() && req.frame() === page1.mainFrame()) {
           const redirectedFrom = req.redirectedFrom();
           if (redirectedFrom) {
-            console.log("Redirect HTTP");
-            console.log("↓");
+            if (config.diagnostics.logLevel === "debug") {
+              console.log("Redirect HTTP");
+              console.log("↓");
+            }
             logger.structured("resolver", "redirect_http", { from: redirectedFrom.url(), to: req.url() });
           }
         }
@@ -121,8 +130,10 @@ class ResolveLinkUseCase {
 
       // Registrar redirects JS
       await page1.exposeFunction("__onLogJsRedirect", (type, url) => {
-        console.log("Redirect JavaScript");
-        console.log("↓");
+        if (config.diagnostics.logLevel === "debug") {
+          console.log("Redirect JavaScript");
+          console.log("↓");
+        }
         logger.structured("resolver", "redirect_javascript", { type, url });
       });
 
@@ -171,18 +182,16 @@ class ResolveLinkUseCase {
       }
 
       const { marketplace, extractor } = registryMatch;
-      console.log("Marketplace identificado");
-      console.log("↓");
-      console.log("Extrator escolhido");
-      console.log("↓");
+      
+      if (config.diagnostics.logLevel === "debug") {
+        console.log("Marketplace identificado");
+        console.log("↓");
+        console.log("Extrator escolhido");
+        console.log("↓");
+      }
       
       logger.structured("detector", "marketplace_matched", { marketplace });
 
-      // Normaliza URL e ID de forma offline/autônoma
-      let urlLimpa = extractor.normalizeUrl(resolution.urlFinal);
-      let productIds = extractor.extractProductId(urlLimpa);
-
-      logger.startStep("metadata_extraction");
       page2 = await BrowserManager.createPage(context);
       
       const startExtract = Date.now();
@@ -191,134 +200,21 @@ class ResolveLinkUseCase {
       let responseHeaders = {};
 
       page2.on("request", (req) => {
-        if (req.url() === urlLimpa) requestHeaders = req.headers();
+        if (req.isNavigationRequest() && req.frame() === page2.mainFrame()) {
+          requestHeaders = req.headers();
+        }
       });
       page2.on("response", (res) => {
-        if (res.url() === urlLimpa) responseHeaders = res.headers();
+        if (res.frame() === page2.mainFrame()) {
+          responseHeaders = res.headers();
+        }
       });
 
-      let metadata = null;
+      let extractionResult = null;
       let extractionError = null;
 
       try {
-        logger.info(`[ResolveLinkUseCase] Carregando URL inicial: ${urlLimpa}`);
-        await page2.goto(urlLimpa, {
-          waitUntil: "domcontentloaded",
-          timeout: config.timeouts.extraction
-        });
-
-        // Se for uma página intermediária (sem ID do produto), tentamos localizar e CLICAR no produto
-        if (!productIds.produto_id) {
-          logger.info(`[ResolveLinkUseCase] Identificada página intermediária para ${marketplace}. Aguardando renderização do conteúdo...`);
-
-          if (marketplace === "mercadolivre") {
-            // Aguarda a listagem de resultados aparecer
-            await page2.waitForSelector(
-              ".ui-search-layout__item, .ui-search-result, .poly-card, .ui-search-link",
-              { timeout: 8000 }
-            ).catch(() => {});
-
-            // Folga extra para renderização completa dos cards
-            await page2.waitForTimeout(2000);
-
-            logger.info(`[ResolveLinkUseCase] Localizando e clicando no primeiro produto da listagem...`);
-
-            // Tenta vários seletores do primeiro card de produto (da mais específica para mais genérica)
-            const primeiroCardSeletor = [
-              ".ui-search-layout__item:first-of-type .poly-component__title",
-              ".ui-search-layout__item:first-of-type .ui-search-item__title",
-              ".ui-search-result:first-of-type .ui-search-item__title",
-              ".poly-card:first-of-type .poly-component__title",
-              ".ui-search-layout__item:first-of-type a.ui-search-link",
-              ".ui-search-layout__item:first-of-type a",
-            ].join(", ");
-
-            const elemento = await page2.$(primeiroCardSeletor);
-
-            if (elemento) {
-              // Rola a página levemente, como um humano faria ao ver a listagem
-              await page2.evaluate(() => window.scrollBy(0, 300));
-              await page2.waitForTimeout(800 + Math.floor(Math.random() * 600));
-
-              // Clica no primeiro produto e aguarda a navegação para a página do produto
-              await Promise.all([
-                page2.waitForNavigation({ waitUntil: "domcontentloaded", timeout: config.timeouts.extraction }),
-                elemento.click(),
-              ]);
-
-              // Aguarda a página do produto estabilizar antes de prosseguir
-              await page2.waitForTimeout(1500);
-              logger.info(`[ResolveLinkUseCase] Navegação após clique concluída. URL: ${page2.url()}`);
-            } else {
-              // Fallback: não encontrou elemento clicável, tenta via href direto
-              logger.warn(`[ResolveLinkUseCase] Elemento clicável não encontrado. Tentando via href...`);
-              const href = await page2.evaluate(() => {
-                const anchors = Array.from(document.querySelectorAll("a"));
-                const direct = anchors.find(a => {
-                  try {
-                    const u = new URL(a.href);
-                    return u.hostname === "produto.mercadolivre.com.br" || u.pathname.startsWith("/p/MLB");
-                  } catch(e) { return false; }
-                });
-                if (direct) return direct.href;
-                const byPath = anchors.find(a => {
-                  try {
-                    const u = new URL(a.href);
-                    return /\/MLB-\d+/.test(u.pathname) && !u.pathname.includes("/pagina/");
-                  } catch(e) { return false; }
-                });
-                return byPath ? byPath.href : null;
-              });
-
-              if (href) {
-                await page2.goto(href, { waitUntil: "domcontentloaded", timeout: config.timeouts.extraction });
-                logger.info(`[ResolveLinkUseCase] Navegação via goto concluída. URL: ${page2.url()}`);
-              } else {
-                logger.warn(`[ResolveLinkUseCase] Nenhum link de produto encontrado na página intermediária.`);
-              }
-            }
-
-            // Re-extrai IDs e normaliza URL após navegação para o produto
-            const novaUrl = page2.url();
-            urlLimpa = extractor.normalizeUrl(novaUrl);
-            productIds = extractor.extractProductId(urlLimpa);
-
-          } else {
-            // Para Amazon e Shopee: estratégia via href
-            const linkCandidato = await page2.evaluate((mkt) => {
-              const anchors = Array.from(document.querySelectorAll("a"));
-              if (mkt === "amazon") {
-                const found = anchors.find(a => a.href.includes("/dp/") || a.href.includes("/gp/product/"));
-                return found ? found.href : null;
-              }
-              if (mkt === "shopee") {
-                const found = anchors.find(a => a.href.includes("-i.") || a.href.includes("/product/"));
-                return found ? found.href : null;
-              }
-              return null;
-            }, marketplace);
-
-            if (linkCandidato) {
-              logger.info(`[ResolveLinkUseCase] Link do produto encontrado: ${linkCandidato}. Navegando...`);
-              await page2.goto(linkCandidato, { waitUntil: "domcontentloaded", timeout: config.timeouts.extraction });
-              const novaUrl = page2.url();
-              urlLimpa = extractor.normalizeUrl(novaUrl);
-              productIds = extractor.extractProductId(urlLimpa);
-            } else {
-              logger.warn(`[ResolveLinkUseCase] Nenhum link de produto encontrado na página intermediária.`);
-            }
-          }
-        }
-
-        // Obtém a URL canônica se disponível no DOM da página
-        const canonicalUrl = await page2.$eval('link[rel="canonical"]', el => el.href).catch(() => null);
-        if (canonicalUrl) {
-          logger.info(`[ResolveLinkUseCase] URL canônica obtida do DOM: ${canonicalUrl}`);
-          urlLimpa = extractor.normalizeUrl(canonicalUrl);
-          productIds = extractor.extractProductId(urlLimpa);
-        }
-
-        metadata = await extractor.extract(page2, urlLimpa);
+        extractionResult = await extractor.extract(page2, resolution.urlFinal);
       } catch (err) {
         extractionError = err;
         logger.error(`❌ [ResolveLinkUseCase] Falha ao extrair metadados: ${err.message}`);
@@ -328,7 +224,7 @@ class ResolveLinkUseCase {
       logger.endStep("metadata_extraction");
 
       // Salva diagnósticos em caso de falha de metadados
-      if (extractionError || !metadata || !metadata.titulo || !metadata.imagem) {
+      if (extractionError || !extractionResult || !extractionResult.titulo || !extractionResult.imagem) {
         const requestId = logger.requestStorage?.getStore()?.requestId || "unknown-request";
         await DiagnosticManager.saveFailure(page2, requestId, {
           urlOriginal: rawUrl,
@@ -345,40 +241,45 @@ class ResolveLinkUseCase {
       page2 = null;
 
       if (extractionError) {
+        if (extractionError.name === "ExtractorError") {
+          return extractionError.toJSON();
+        }
         throw extractionError;
       }
 
-      if (metadata.titulo) {
-        console.log("Título encontrado");
-        console.log("↓");
+      if (config.diagnostics.logLevel === "debug") {
+        if (extractionResult.titulo) {
+          console.log("Título encontrado");
+          console.log("↓");
+        }
+        if (extractionResult.imagem) {
+          console.log("Imagem encontrada");
+          console.log("↓");
+        }
+        console.log("Finalizado");
       }
-      if (metadata.imagem) {
-        console.log("Imagem encontrada");
-        console.log("↓");
-      }
-
-      console.log("Finalizado");
       
       const tempoTotalMs = Date.now() - startTotalTime;
 
       logger.structured("extraction", "extraction_finished", {
         marketplace,
-        produto_id: productIds.produto_id,
-        titulo: metadata.titulo
+        produto_id: extractionResult.produto_id,
+        titulo: extractionResult.titulo
       });
 
       return {
         success: true,
         marketplace,
-        ...productIds,
+        produto_id: extractionResult.produto_id,
+        shop_id: extractionResult.shop_id || null,
         url_original: rawUrl,
         url_encontrada: resolution.urlFinal,
-        url_final: urlLimpa,
-        titulo: metadata.titulo,
-        imagem: metadata.imagem,
-        preco: metadata.preco || null,
-        vendedor: metadata.vendedor || null,
-        avaliacao: metadata.avaliacao || null,
+        url_final: extractionResult.url_final,
+        titulo: extractionResult.titulo,
+        imagem: extractionResult.imagem,
+        preco: extractionResult.preco || null,
+        vendedor: extractionResult.vendedor || null,
+        avaliacao: extractionResult.avaliacao || null,
         chain: resolution.chain,
         metricas: {
           tempoConexaoMs,
