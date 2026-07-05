@@ -1,71 +1,96 @@
-import SessionManager from "./SessionManager.js";
-import ContextFactory from "./ContextFactory.js";
+import ProviderFactory from "./ProviderFactory.js";
+import LifecycleManager from "./LifecycleManager.js";
+import BrowserHealthManager from "./BrowserHealthManager.js";
 
 class BrowserManager {
+  constructor() {
+    // Instancia o provedor de forma única no boot da aplicação
+    this._provider = ProviderFactory.getProvider();
+  }
+
   /**
-   * Cria um novo contexto de navegação isolado.
+   * Retorna o Provedor ativo.
+   */
+  get provider() {
+    return this._provider;
+  }
+
+  /**
+   * Obtém a instância ativa do browser do Playwright.
+   * @returns {Promise<import('playwright').Browser>}
+   */
+  async getBrowser() {
+    return await LifecycleManager.getBrowser(this._provider);
+  }
+
+  /**
+   * Cria ou reutiliza o contexto de navegação.
+   * Obtém a instância do browser automaticamente caso seja omitida.
+   * @param {import('playwright').Browser} [browser]
    * @returns {Promise<import('playwright').BrowserContext>}
    */
-  async createContext() {
-    const browser = await SessionManager.getBrowser();
-    return await ContextFactory.createContext(browser);
+  async createContext(browser = null) {
+    let activeBrowser = browser;
+    if (!activeBrowser) {
+      activeBrowser = await this.getBrowser();
+    }
+    return await LifecycleManager.createContext(this._provider, activeBrowser);
   }
 
   /**
-   * Abre uma nova aba (página) dentro de um contexto específico ou cria um novo contexto.
-   * @param {import('playwright').BrowserContext} [context] - Contexto de navegação opcional.
-   * @returns {Promise<{ page: import('playwright').Page, context: import('playwright').BrowserContext }>}
+   * Abre uma nova aba (página).
+   * @param {import('playwright').BrowserContext} context 
+   * @returns {Promise<import('playwright').Page>}
    */
-  async createPage(context = null) {
-    let activeContext = context;
-    if (!activeContext) {
-      activeContext = await this.createContext();
-    }
-    
-    try {
-      const page = await activeContext.newPage();
-      return { page, context: activeContext };
-    } catch (error) {
-      console.error("❌ Erro ao criar nova aba no BrowserManager:", error);
-      throw error;
-    }
+  async createPage(context) {
+    return await LifecycleManager.createPage(this._provider, context);
   }
 
   /**
-   * Fecha uma aba (página) de forma segura.
-   * @param {import('playwright').Page} page - A página a ser fechada.
+   * Fecha uma aba de forma segura.
+   * @param {import('playwright').Page} page 
    */
   async closePage(page) {
-    if (page) {
-      try {
-        if (!page.isClosed()) {
-          await page.close();
-        }
-      } catch (error) {
-        console.error("❌ Erro ao fechar aba no BrowserManager:", error);
-      }
-    }
+    await LifecycleManager.closePage(this._provider, page);
   }
 
   /**
-   * Fecha um contexto de navegação e todas as suas abas de forma segura.
-   * @param {import('playwright').BrowserContext} context - O contexto a ser fechado.
+   * Fecha o contexto de navegação de forma segura.
+   * @param {import('playwright').BrowserContext} context 
    */
   async closeContext(context) {
-    if (context) {
-      try {
-        await context.close();
-      } catch (error) {
-        console.error("❌ Erro ao fechar contexto no BrowserManager:", error);
-      }
+    await LifecycleManager.closeContext(this._provider, context);
+  }
+
+  /**
+   * Realiza a verificação de saúde do navegador através de ping CDP.
+   * Totalmente agnóstico ao provedor.
+   * @returns {Promise<object>} Dados de saúde e conectividade.
+   */
+  async checkHealth() {
+    try {
+      const browser = await this.getBrowser();
+      return await BrowserHealthManager.checkHealth(browser);
+    } catch (error) {
+      return {
+        connected: false,
+        lastPingMs: -1,
+        lastPingTimestamp: new Date().toISOString(),
+        error: error.message
+      };
     }
   }
 
   /**
-   * Fecha o navegador completamente.
+   * Encerra conexões CDP ativas no desligamento da API.
    */
   async shutdown() {
-    await SessionManager.close();
+    try {
+      const browser = await this.getBrowser();
+      await LifecycleManager.closeBrowser(this._provider, browser);
+    } catch (error) {
+      // Ignora falhas de desligamento se o navegador já estiver inativo
+    }
   }
 }
 
