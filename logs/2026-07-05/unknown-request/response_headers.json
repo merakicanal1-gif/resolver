@@ -1,0 +1,19 @@
+{
+  "cache-control": "no-cache",
+  "content-encoding": "gzip",
+  "content-type": "text/html; charset=utf-8",
+  "date": "Sun, 05 Jul 2026 02:36:45 GMT",
+  "etag": "W/\"e768adac77f05f61c3b6d93aa5e81013\"",
+  "last-modified": "Mon, 03 Jun 2024 11:05:20 GMT",
+  "originalmd5": "e768adac77f05f61c3b6d93aa5e81013",
+  "server": "SGW",
+  "vary": "Accept-Encoding",
+  "x-cache-status": "HIT",
+  "x-cdn": "staticcache",
+  "x-origin": "uss",
+  "x-ratelimit-limit": "1666.6666666667",
+  "x-ratelimit-remaining": "1657.6666666667",
+  "x-request-id": "32a5272f-3b38-4216-a386-78479a45b622",
+  "x-uri": "/shopee-mktspa-live-sg/portal/h5-link-track/index.html",
+  "x-via": "69.3"
+}

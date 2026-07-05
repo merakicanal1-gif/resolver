@@ -1,92 +1,86 @@
 import test from "node:test";
 import assert from "node:assert";
+import http from "node:http";
 import BrowserManager from "../../src/core/browser/BrowserManager.js";
-import LinkResolver from "../../src/domain/LinkResolver.js";
-import ExtractorRegistry from "../../src/market-extractors/ExtractorRegistry.js";
-import MarketplaceDetector from "../../src/domain/MarketplaceDetector.js";
-import logger from "../../src/utils/logger.js";
+import ResolveLinkUseCase from "../../src/use-cases/ResolveLinkUseCase.js";
 
-// Só executa se a variável RUN_INTEGRATION_TESTS for true ou se estiver rodando explicitamente
-const runIntegration = process.env.RUN_INTEGRATION_TESTS === "true" || true;
+// Executa os testes de integração se BROWSER_PROVIDER for chrome ou se rodado explicitamente
+const runIntegration = process.env.BROWSER_PROVIDER === "chrome";
 
-test("Testes de Integração com o Navegador (Browserless)", { skip: !runIntegration }, async (t) => {
+test("Suite de Testes de Integração - Pipeline de Resolução e Extração (Chrome CDP)", { skip: !runIntegration }, async (t) => {
   let context;
-  
+  let mockServer;
+
   t.before(async () => {
-    // Inicializa o contexto antes dos testes
+    // Inicializa servidor HTTP local para mockar redirects reais sem depender de encurtadores instáveis
+    mockServer = http.createServer((req, res) => {
+      if (req.url === "/redirect-amazon") {
+        res.writeHead(302, { Location: "https://www.amazon.com.br/dp/B0BLS36SHC" });
+        res.end();
+      } else if (req.url === "/redirect-meli") {
+        res.writeHead(302, { Location: "https://produto.mercadolivre.com.br/MLB-3407981503-adaptador-conversor-hdmi-para-vga-com-saida-de-audio-p2-_JM" });
+        res.end();
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+
+    await new Promise((resolve) => mockServer.listen(4567, resolve));
+    
     try {
       context = await BrowserManager.createContext();
     } catch (error) {
-      console.warn("⚠️ Não foi possível conectar ao Browserless para os testes de integração. Pulando.");
-      t.skip("Browserless indisponível");
+      console.error("❌ Falha ao conectar ao Chrome CDP para os testes de integração:", error.message);
+      t.skip("Chrome CDP indisponível");
     }
   });
 
   t.after(async () => {
-    // Encerra e libera recursos
-    if (context) {
-      await BrowserManager.closeContext(context);
+    if (mockServer) {
+      await new Promise((resolve) => mockServer.close(resolve));
     }
-    await BrowserManager.shutdown();
+    await BrowserManager.shutdown().catch(() => {});
   });
 
-  await t.test("LinkResolver - Deve resolver um link da Amazon e registrar a cadeia", async () => {
-    if (!context) return;
-    const { page } = await BrowserManager.createPage(context);
-    
-    try {
-      // Usaremos um link encurtado da Amazon para o teste
-      const urlOriginal = "https://amzn.to/3W0kKkX"; // Link encurtado válido da Amazon
-      const resultado = await LinkResolver.resolve(page, urlOriginal);
-      
-      assert.ok(resultado.urlFinal, "A URL final não deve ser vazia.");
-      assert.ok(resultado.urlFinal.includes("amazon.com.br"), "Deveria resolver para um link da Amazon.");
-      assert.ok(resultado.chain.length > 0, "A cadeia de redirecionamento (chain) deve conter URLs.");
-      assert.strictEqual(resultado.chain[0], urlOriginal, "O primeiro link da cadeia deve ser a URL original.");
-    } finally {
-      await BrowserManager.closePage(page);
-    }
+  await t.test("Amazon - Deve resolver link curto/afiliado e extrair metadados completos", async () => {
+    const urlOriginal = "http://localhost:4567/redirect-amazon";
+    const result = await ResolveLinkUseCase.execute(urlOriginal);
+
+    assert.strictEqual(result.success, true, "Operação deveria ter sucesso");
+    assert.strictEqual(result.marketplace, "amazon", "Marketplace deve ser amazon");
+    assert.ok(result.produto_id, "ASIN do produto deve ser extraído");
+    assert.strictEqual(result.produto_id, "B0BLS36SHC", "ASIN extraído incorretamente");
+    assert.ok(result.titulo, "Título do produto deve ser extraído");
+    assert.ok(result.imagem, "Imagem do produto deve ser extraída");
+    assert.ok(result.url_final.includes("/dp/B0BLS36SHC"), "A URL final deve estar limpa e conter o ASIN");
+    assert.ok(result.chain.length > 0, "Cadeia de redirects não deve estar vazia");
   });
 
-  await t.test("AmazonExtractor - Deve extrair título e imagem de um produto real da Amazon", async () => {
-    if (!context) return;
-    const { page } = await BrowserManager.createPage(context);
-    
-    try {
-      // URL direta de produto na Amazon
-      const urlProduto = "https://www.amazon.com.br/dp/B07PFF59NC"; // Exemplo: Echo Dot
-      await page.goto(urlProduto, { waitUntil: "domcontentloaded", timeout: 15000 });
-      
-      const extractor = ExtractorRegistry.getExtractor("amazon");
-      const dados = await extractor.extract(page);
-      
-      assert.ok(dados.titulo, "O título da Amazon não deveria ser nulo.");
-      assert.ok(dados.titulo.toLowerCase().includes("echo"), "O título deveria conter 'echo'.");
-      assert.ok(dados.imagem, "A imagem da Amazon não deveria ser nula.");
-      assert.ok(dados.imagem.startsWith("http"), "A URL da imagem deve ser válida.");
-    } finally {
-      await BrowserManager.closePage(page);
-    }
+  await t.test("Mercado Livre - Deve resolver meli.la/link oficial e extrair metadados completos", async () => {
+    const urlOriginal = "http://localhost:4567/redirect-meli";
+    const result = await ResolveLinkUseCase.execute(urlOriginal);
+
+    assert.strictEqual(result.success, true, "Operação deveria ter sucesso");
+    assert.strictEqual(result.marketplace, "mercadolivre", "Marketplace deve ser mercadolivre");
+    assert.ok(result.produto_id, "MLB ID do produto deve ser extraído");
+    assert.strictEqual(result.produto_id, "MLB-3407981503", "MLB ID extraído incorretamente");
+    assert.ok(result.titulo, "Título do produto deve ser extraído");
+    assert.ok(result.imagem, "Imagem do produto deve ser extraída");
+    assert.ok(result.url_final.includes("MLB-3407981503"), "A URL final deve estar limpa e conter o MLB ID");
+    assert.ok(result.chain.length > 0, "Cadeia de redirects não deve estar vazia");
   });
-  
-  await t.test("MercadoLivreExtractor - Deve extrair título e imagem de um produto real", async () => {
-    if (!context) return;
-    const { page } = await BrowserManager.createPage(context);
-    
-    try {
-      // URL direta de produto no Mercado Livre
-      // MLB-3407981503 é um exemplo estável (geralmente produtos populares)
-      const urlProduto = "https://produto.mercadolivre.com.br/MLB-3407981503-adaptador-conversor-hdmi-para-vga-com-saida-de-audio-p2-_JM";
-      await page.goto(urlProduto, { waitUntil: "domcontentloaded", timeout: 15000 });
-      
-      const extractor = ExtractorRegistry.getExtractor("mercadolivre");
-      const dados = await extractor.extract(page);
-      
-      assert.ok(dados.titulo, "O título do Mercado Livre não deveria ser nulo.");
-      assert.ok(dados.imagem, "A imagem do Mercado Livre não deveria ser nula.");
-      assert.ok(dados.imagem.startsWith("http"), "A URL da imagem deve ser válida.");
-    } finally {
-      await BrowserManager.closePage(page);
-    }
+
+  await t.test("Shopee - Deve resolver shope.ee e extrair metadados completos", async () => {
+    const urlOriginal = "https://shope.ee/4Ae01i5wNK"; // Redireciona para produto Shopee real ativo
+    const result = await ResolveLinkUseCase.execute(urlOriginal);
+
+    assert.strictEqual(result.success, true, "Operação deveria ter sucesso");
+    assert.strictEqual(result.marketplace, "shopee", "Marketplace deve ser shopee");
+    assert.ok(result.produto_id, "ID do produto deve ser extraído");
+    assert.strictEqual(result.produto_id, "8238335156", "ID do produto extraído incorretamente");
+    assert.ok(result.titulo, "Título do produto deve ser extraído");
+    assert.ok(result.imagem, "Imagem do produto deve ser extraída");
+    assert.ok(result.chain.length > 0, "Cadeia de redirects não deve estar vazia");
   });
 });

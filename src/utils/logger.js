@@ -88,6 +88,27 @@ class Logger {
     };
     this._log("ERROR", message, errorMeta);
   }
+
+  /**
+   * Registra um log estruturado puro no formato JSON.
+   */
+  structured(step, event, details = {}) {
+    const context = requestStorage.getStore();
+    const requestId = context ? context.requestId : "unknown-request";
+    const startTime = context ? context.steps[step] || context.startTime : Date.now();
+    const elapsedMs = Date.now() - startTime;
+
+    const logEntry = {
+      requestId,
+      step,
+      event,
+      timestamp: new Date().toISOString(),
+      elapsedMs,
+      ...details
+    };
+
+    console.log(JSON.stringify(logEntry));
+  }
 }
 
 export default new Logger();

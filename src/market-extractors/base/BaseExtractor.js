@@ -1,15 +1,25 @@
 /**
  * Classe base para todos os extratores de marketplaces.
- * Define o contrato/interface comum para extração de dados e normalização de URLs.
+ * Define a interface obrigatória e opcional comum para os extratores do pipeline.
  */
 class BaseExtractor {
+  constructor() {
+    this.marketplace = "generic";
+    this.supportedDomains = [];
+  }
+
   /**
-   * Extrai as informações da página do produto (como título e imagem).
-   * @param {import('playwright').Page} page - Página com o produto carregado.
-   * @returns {Promise<{ titulo: string|null, imagem: string|null }>} Dados extraídos.
+   * Determina se este extrator suporta uma URL específica.
+   * @param {string} url - A URL do produto.
+   * @returns {boolean} True se for compatível, false caso contrário.
    */
-  async extract(page) {
-    throw new Error("O método 'extract(page)' deve ser implementado pela subclasse.");
+  supports(url) {
+    try {
+      const hostname = new URL(url).hostname.toLowerCase();
+      return this.supportedDomains.some(domain => hostname.includes(domain));
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -28,6 +38,31 @@ class BaseExtractor {
    */
   extractProductId(url) {
     throw new Error("O método 'extractProductId(url)' deve ser implementado pela subclasse.");
+  }
+
+  /**
+   * Extrai as informações da página do produto.
+   * Deve obrigatoriamente retornar o esquema padronizado.
+   * 
+   * @param {import('playwright').Page} page - Página com o produto carregado.
+   * @param {string} urlFinal - URL final estabilizada e limpa.
+   * @returns {Promise<object>} Dados extraídos no formato padrão do pipeline.
+   */
+  async extract(page, urlFinal) {
+    throw new Error("O método 'extract(page, urlFinal)' deve ser implementado pela subclasse.");
+  }
+
+  // Métodos opcionais com implementação default vazia/nula
+  validate(page) {
+    return true;
+  }
+
+  canExtract(page) {
+    return true;
+  }
+
+  postProcess(result) {
+    return result;
   }
 }
 

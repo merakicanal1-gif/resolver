@@ -1,6 +1,7 @@
 import express from "express";
 import dotenv from "dotenv";
 import resolveRoute from "./routes/resolve.js";
+import browserRoute from "./routes/browser.js";
 import BrowserManager from "./src/core/browser/BrowserManager.js";
 import config from "./src/config/index.js";
 
@@ -11,6 +12,7 @@ const app = express();
 app.use(express.json());
 
 app.use("/resolve", resolveRoute);
+app.use("/browser", browserRoute);
 
 // ROTA TEMPORÁRIA DA ETAPA 1 (Acessível na raiz em GET /debug/browser)
 app.get("/debug/browser", async (req, res) => {

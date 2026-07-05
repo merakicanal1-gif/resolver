@@ -1,16 +1,14 @@
 import BrowserManager from "../core/browser/BrowserManager.js";
 import SessionManager from "../core/browser/SessionManager.js";
 import LinkResolver from "../domain/LinkResolver.js";
-import MarketplaceDetector from "../domain/MarketplaceDetector.js";
 import ExtractorRegistry from "../market-extractors/ExtractorRegistry.js";
-import NavigationManager from "../core/navigation/NavigationManager.js";
 import logger from "../utils/logger.js";
 import config from "../config/index.js";
 import DiagnosticManager from "../utils/DiagnosticManager.js";
 
 class ResolveLinkUseCase {
   /**
-   * Executa o caso de uso de resolução de link com tratamento de retry automático em caso de falha de conexão.
+   * Executa o caso de uso de resolução de link em 2 fases desacopladas.
    * @param {string} rawUrl - A URL enviada pelo cliente.
    * @returns {Promise<object>} O resultado JSON estruturado.
    */
@@ -23,14 +21,17 @@ class ResolveLinkUseCase {
       };
     }
 
-    logger.startStep("use_case_execution");
-    logger.info(`[REQ_INICIADA] Processando URL original: ${rawUrl}`);
+    const startTotalTime = Date.now();
+    logger.startStep("total_execution");
+    
+    // Log inicial humanizado
+    console.log("Request iniciado");
+    console.log("↓");
+    logger.structured("total_execution", "request_initiated", { url: rawUrl });
 
     try {
-      // Primeira tentativa
-      return await this._runOperation(rawUrl);
+      return await this._runPipeline(rawUrl, startTotalTime);
     } catch (error) {
-      // Verifica se o erro está associado a falhas de conexão CDP, sockets ou navegador fechado
       const isConnectionError = 
         error.message.includes("closed") || 
         error.message.includes("CDP") || 
@@ -39,32 +40,25 @@ class ResolveLinkUseCase {
         error.message.includes("Target page");
 
       if (isConnectionError) {
-        logger.warn(`[CONEXAO_FALHOU] Primeira tentativa falhou por conexão: "${error.message}". Iniciando retry único...`);
-        
-        // Descarta ativamente a conexão corrompida do SessionManager
+        logger.warn(`⚠️ [ResolveLinkUseCase] Erro de conexão do navegador detectado: "${error.message}". Tentando recriar sessão e executar retry...`);
         await SessionManager.forceRecreate().catch(() => {});
         
         try {
-          logger.info("🔄 [RECONEXAO_REALIZADA] Executando segunda tentativa (retry)...");
-          const result = await this._runOperation(rawUrl);
-          logger.info("✅ [RECONEXAO_SUCESSO] Operação concluída com sucesso no retry.");
-          return result;
+          console.log("Reconectando navegador...");
+          console.log("↓");
+          return await this._runPipeline(rawUrl, startTotalTime);
         } catch (retryError) {
-          logger.error("❌ [RECONEXAO_FALHA] Falha na segunda tentativa (retry) com o Browserless:", retryError);
-          
-          // Retorno estruturado conforme regras do usuário (HTTP 503 no controller correspondente)
+          logger.error("❌ [ResolveLinkUseCase] Erro crítico persistente após retry:", retryError);
           return {
             success: false,
             code: "BROWSER_CONNECTION_ERROR",
-            message: "Não foi possível conectar ao Browserless.",
-            retryable: true,
+            message: "Não foi possível conectar ao provedor de navegador.",
             chain: [rawUrl]
           };
         }
       }
 
-      // Erros internos que não são de conexão com o navegador (ex: bugs de lógica, etc.)
-      logger.error("❌ [ERRO_ETAPA] Erro de lógica interna durante a execução do Caso de Uso:", error);
+      logger.error("❌ [ResolveLinkUseCase] Erro de execução na etapa do pipeline:", error);
       return {
         success: false,
         code: "INTERNAL_ERROR",
@@ -72,158 +66,333 @@ class ResolveLinkUseCase {
         chain: [rawUrl]
       };
     } finally {
-      logger.endStep("use_case_execution");
-      logger.info(`[REQ_FINALIZADA] Fluxo completo encerrado.`);
+      logger.endStep("total_execution");
     }
   }
 
   /**
-   * Executa a operação real de resolução e extração em uma tentativa.
-   * Lança erros de conexão para que o método pai gerencie o retry.
-   * @param {string} rawUrl 
-   * @returns {Promise<object>}
+   * Executa o pipeline de 2 fases.
    * @private
    */
-  async _runOperation(rawUrl) {
+  async _runPipeline(rawUrl, startTotalTime) {
     let context = null;
     let page1 = null;
     let page2 = null;
-    let urlFinal = rawUrl;
-    let redirectChain = [rawUrl];
+
+    // Métricas
+    let tempoConexaoMs = 0;
+    let tempoResolucaoMs = 0;
+    let tempoExtracaoMs = 0;
 
     try {
-      // 1. Cria um contexto isolado para a tentativa atual
-      logger.info("[CONTEXTO_CRIADO] Criando novo contexto isolado de navegação...");
+      // -------------------------------------------------------------
+      // INICIALIZAÇÃO
+      // -------------------------------------------------------------
+      const startConnect = Date.now();
       context = await BrowserManager.createContext();
+      
+      const providerName = config.browser.provider === "chrome" ? "Chrome" : "Browserless";
+      console.log(`${providerName} conectado`);
+      console.log("↓");
+      
+      tempoConexaoMs = Date.now() - startConnect;
+      logger.structured("initialization", "browser_connected", { provider: config.browser.provider });
 
       // -------------------------------------------------------------
-      // ABA 1: Resolução de redirecionamentos e encurtadores
+      // FASE 1: RESOLUÇÃO DE LINKS (LinkResolver)
       // -------------------------------------------------------------
       logger.startStep("link_resolution");
-      logger.info("[ABA1_CRIADA] Abrindo aba de resolução...");
-      const page1Setup = await BrowserManager.createPage(context);
-      page1 = page1Setup.page;
-
-      logger.info("[RESOLUCAO_INICIADA] Iniciando resolvedor de links...");
-      const resolution = await LinkResolver.resolve(page1, rawUrl);
-      urlFinal = resolution.urlFinal;
-      redirectChain = resolution.chain;
-
-      logger.endStep("link_resolution");
-      logger.info(`[RESOLUCAO_ESTABILIZADA] Resolução concluída. Fechando aba 1...`);
+      page1 = await BrowserManager.createPage(context);
       
-      // Fecha a Aba 1 imediatamente para liberar memória e cookies de trackers
+      console.log("Nova URL");
+      console.log("↓");
+
+      // Escuta eventos e imprime logs humanizados específicos da Fase 1
+      page1.on("request", (req) => {
+        if (req.isNavigationRequest() && req.frame() === page1.mainFrame()) {
+          const redirectedFrom = req.redirectedFrom();
+          if (redirectedFrom) {
+            console.log("Redirect HTTP");
+            console.log("↓");
+            logger.structured("resolver", "redirect_http", { from: redirectedFrom.url(), to: req.url() });
+          }
+        }
+      });
+
+      // Registrar redirects JS
+      await page1.exposeFunction("__onLogJsRedirect", (type, url) => {
+        console.log("Redirect JavaScript");
+        console.log("↓");
+        logger.structured("resolver", "redirect_javascript", { type, url });
+      });
+
+      await page1.addInitScript(() => {
+        const origPushState = window.history.pushState;
+        window.history.pushState = function(...args) {
+          const res = origPushState.apply(this, args);
+          window.__onLogJsRedirect("pushState", window.location.href);
+          return res;
+        };
+        const origReplaceState = window.history.replaceState;
+        window.history.replaceState = function(...args) {
+          const res = origReplaceState.apply(this, args);
+          window.__onLogJsRedirect("replaceState", window.location.href);
+          return res;
+        };
+        window.addEventListener("hashchange", () => {
+          window.__onLogJsRedirect("hashchange", window.location.href);
+        });
+      });
+
+      const resolution = await LinkResolver.resolve(page1, rawUrl, config.timeouts.resolution);
+      tempoResolucaoMs = resolution.tempoResolucao;
+      
+      logger.endStep("link_resolution");
+      logger.structured("resolver", "resolution_finished", { urlFinal: resolution.urlFinal, chain: resolution.chain });
+
+      // Fecha Aba 1 imediatamente
       await BrowserManager.closePage(page1);
       page1 = null;
 
-      // 2. Detecta o Marketplace da URL final resolvida
-      const marketplace = MarketplaceDetector.detect(urlFinal);
-      logger.info(`[MARKETPLACE_DETECTADO] Marketplace identificado: ${marketplace}`);
-
-      // 3. Validação de Marketplace suportado (apenas Amazon, Mercado Livre e Shopee)
-      const supportedMarkets = ["amazon", "mercadolivre", "shopee"];
-      if (!supportedMarkets.includes(marketplace)) {
-        logger.warn(`⚠️ [MARKETPLACE_NAO_SUPORTADO] O marketplace '${marketplace}' não é suportado para extração.`);
+      // -------------------------------------------------------------
+      // FASE 2: EXTRAÇÃO DE METADADOS
+      // -------------------------------------------------------------
+      // Consulta unificada ao ExtractorRegistry
+      const registryMatch = ExtractorRegistry.find(resolution.urlFinal);
+      if (!registryMatch) {
+        logger.warn(`⚠️ [ResolveLinkUseCase] Marketplace não suportado para URL: ${resolution.urlFinal}`);
         return {
           success: false,
           code: "UNSUPPORTED_MARKETPLACE",
           message: "Marketplace ainda não suportado.",
-          marketplace,
-          url_final: urlFinal,
-          chain: redirectChain
+          url_final: resolution.urlFinal,
+          chain: resolution.chain
         };
       }
 
-      // 4. Obtém o Extrator específico
-      const extractor = ExtractorRegistry.getExtractor(marketplace);
+      const { marketplace, extractor } = registryMatch;
+      console.log("Marketplace identificado");
+      console.log("↓");
+      console.log("Extrator escolhido");
+      console.log("↓");
       
-      // 5. Normaliza a URL e extrai IDs de produto (sem usar o browser)
-      const urlLimpa = extractor.normalizeUrl(urlFinal);
-      const productIds = extractor.extractProductId(urlLimpa);
-      logger.info(`[NORMALIZACAO_CONCLUIDA] URL limpa obtida: ${urlLimpa}`);
+      logger.structured("detector", "marketplace_matched", { marketplace });
 
-      // -------------------------------------------------------------
-      // ABA 2: Abertura da URL limpa e extração de metadados
-      // -------------------------------------------------------------
+      // Normaliza URL e ID de forma offline/autônoma
+      let urlLimpa = extractor.normalizeUrl(resolution.urlFinal);
+      let productIds = extractor.extractProductId(urlLimpa);
+
       logger.startStep("metadata_extraction");
-      logger.info("[ABA2_CRIADA] Abrindo aba de extração...");
-      const page2Setup = await BrowserManager.createPage(context);
-      page2 = page2Setup.page;
-
+      page2 = await BrowserManager.createPage(context);
+      
+      const startExtract = Date.now();
+      
       let requestHeaders = {};
       let responseHeaders = {};
 
-      // Captura de cabeçalhos de requisição e resposta do produto
       page2.on("request", (req) => {
-        if (req.url() === urlLimpa) {
-          requestHeaders = req.headers();
-        }
+        if (req.url() === urlLimpa) requestHeaders = req.headers();
       });
-
       page2.on("response", (res) => {
-        if (res.url() === urlLimpa) {
-          responseHeaders = res.headers();
-        }
+        if (res.url() === urlLimpa) responseHeaders = res.headers();
       });
 
-      let metadata = { titulo: null, imagem: null };
+      let metadata = null;
       let extractionError = null;
 
       try {
-        logger.info(`[EXTRACAO_INICIADA] Carregando URL do produto limpo na aba 2...`);
-        await NavigationManager.navigateTo(page2, urlLimpa, {
+        logger.info(`[ResolveLinkUseCase] Carregando URL inicial: ${urlLimpa}`);
+        await page2.goto(urlLimpa, {
+          waitUntil: "domcontentloaded",
           timeout: config.timeouts.extraction
         });
 
-        metadata = await extractor.extract(page2);
+        // Se for uma página intermediária (sem ID do produto), tentamos localizar o link do produto nela
+        if (!productIds.produto_id) {
+          logger.info(`[ResolveLinkUseCase] Identificada página intermediária para ${marketplace}. Aguardando renderização do conteúdo...`);
+          
+          if (marketplace === "mercadolivre") {
+            await page2.waitForSelector(".ui-search-layout, .ui-search-results, .ui-search-link, a", { timeout: 5000 }).catch(() => {});
+          } else if (marketplace === "amazon") {
+            await page2.waitForSelector("#search, .s-search-results, .s-result-item", { timeout: 5000 }).catch(() => {});
+          } else if (marketplace === "shopee") {
+            await page2.waitForSelector(".shopee-search-item-result, .search-item-list", { timeout: 5000 }).catch(() => {});
+          }
+
+          // Folga de estabilização pós-render
+          await page2.waitForTimeout(1500);
+
+          logger.info(`[ResolveLinkUseCase] Buscando link de produto individual...`);
+          
+          const linkCandidato = await page2.evaluate((mkt) => {
+            const anchors = Array.from(document.querySelectorAll("a"));
+
+            if (mkt === "mercadolivre") {
+              // Estratégia 1: link direto para produto.mercadolivre.com.br ou /p/MLB
+              const produtoLink = anchors.find(a => {
+                try {
+                  const u = new URL(a.href);
+                  return u.hostname === "produto.mercadolivre.com.br" || u.pathname.startsWith("/p/MLB");
+                } catch(e) { return false; }
+              });
+              if (produtoLink) return produtoLink.href;
+
+              // Estratégia 2: link de click-tracker com urldest decodificado apontando para produto
+              const clickLink = anchors.find(a => {
+                if (!a.href.includes("urldest=")) return false;
+                try {
+                  const urlObj = new URL(a.href);
+                  const dest = urlObj.searchParams.get("urldest");
+                  if (!dest) return false;
+                  let decoded = decodeURIComponent(dest);
+                  if (decoded.includes("%")) decoded = decodeURIComponent(decoded);
+                  const du = new URL(decoded);
+                  return du.hostname === "produto.mercadolivre.com.br" || du.pathname.startsWith("/p/MLB");
+                } catch(e) { return false; }
+              });
+              if (clickLink) {
+                try {
+                  const urlObj = new URL(clickLink.href);
+                  const dest = urlObj.searchParams.get("urldest");
+                  let decoded = decodeURIComponent(dest);
+                  if (decoded.includes("%")) decoded = decodeURIComponent(decoded);
+                  return decoded;
+                } catch(e) {}
+              }
+
+              // Estratégia 3: primeiro card de resultado de busca (título clicável)
+              const cardTitle = document.querySelector(".ui-search-item__title, .poly-component__title");
+              if (cardTitle) {
+                const anchor = cardTitle.closest("a") || cardTitle.querySelector("a") || cardTitle.parentElement?.closest("a");
+                if (anchor && anchor.href) return anchor.href;
+              }
+
+              // Estratégia 4: qualquer link com /MLB-DIGITS no path (excluindo páginas de loja /pagina/)
+              const mlbPathLink = anchors.find(a => {
+                try {
+                  const u = new URL(a.href);
+                  return /\/MLB-\d+/.test(u.pathname) && !u.pathname.includes("/pagina/");
+                } catch(e) { return false; }
+              });
+              return mlbPathLink ? mlbPathLink.href : null;
+            }
+
+            if (mkt === "amazon") {
+              const found = anchors.find(a => {
+                const href = a.href || "";
+                return href.includes("/dp/") || href.includes("/gp/product/");
+              });
+              return found ? found.href : null;
+            }
+
+            if (mkt === "shopee") {
+              const found = anchors.find(a => {
+                const href = a.href || "";
+                return href.includes("-i.") || href.includes("/product/");
+              });
+              return found ? found.href : null;
+            }
+
+            return null;
+          }, marketplace);
+
+          if (linkCandidato) {
+            logger.info(`[ResolveLinkUseCase] Link do produto encontrado na página intermediária: ${linkCandidato}. Navegando...`);
+            await page2.goto(linkCandidato, {
+              waitUntil: "domcontentloaded",
+              timeout: config.timeouts.extraction
+            });
+            
+            // Re-extrai IDs e normaliza a URL a partir do novo destino
+            const novaUrl = page2.url();
+            urlLimpa = extractor.normalizeUrl(novaUrl);
+            productIds = extractor.extractProductId(urlLimpa);
+          } else {
+            logger.warn(`[ResolveLinkUseCase] Nenhum link de produto correspondente encontrado na página intermediária.`);
+          }
+        }
+
+        // Obtém a URL canônica se disponível no DOM da página
+        const canonicalUrl = await page2.$eval('link[rel="canonical"]', el => el.href).catch(() => null);
+        if (canonicalUrl) {
+          logger.info(`[ResolveLinkUseCase] URL canônica obtida do DOM: ${canonicalUrl}`);
+          urlLimpa = extractor.normalizeUrl(canonicalUrl);
+          productIds = extractor.extractProductId(urlLimpa);
+        }
+
+        metadata = await extractor.extract(page2, urlLimpa);
       } catch (err) {
         extractionError = err;
-        logger.error(`❌ [ERRO_EXTRACAO] Falha ao carregar ou raspar dados na aba 2: ${err.message}`);
+        logger.error(`❌ [ResolveLinkUseCase] Falha ao extrair metadados: ${err.message}`);
       }
 
+      tempoExtracaoMs = Date.now() - startExtract;
       logger.endStep("metadata_extraction");
 
-      // Se a extração falhar por erro, ou se retornar dados incompletos, executa o salvamento de diagnóstico
-      if (extractionError || !metadata.titulo || !metadata.imagem) {
-        logger.warn(`⚠️ [DIAGNOSTICO_ATIVADO] Ativando salvamento de logs de debug para o marketplace: ${marketplace}`);
-        const contextStore = logger.requestStorage?.getStore();
-        const requestId = contextStore ? contextStore.requestId : "unknown-request";
-
+      // Salva diagnósticos em caso de falha de metadados
+      if (extractionError || !metadata || !metadata.titulo || !metadata.imagem) {
+        const requestId = logger.requestStorage?.getStore()?.requestId || "unknown-request";
         await DiagnosticManager.saveFailure(page2, requestId, {
           urlOriginal: rawUrl,
-          urlFinal,
+          urlFinal: resolution.urlFinal,
           marketplace,
-          chain: redirectChain,
+          chain: resolution.chain,
           requestHeaders,
           responseHeaders,
-          error: extractionError ? extractionError.message : `Metadados nulos (titulo=${metadata.titulo}, imagem=${metadata.imagem})`
-        });
+          error: extractionError ? extractionError.message : "Metadados incompletos"
+        }).catch(() => {});
       }
 
-      // Fecha a Aba 2
       await BrowserManager.closePage(page2);
       page2 = null;
 
-      // Se houve erro na extração (como timeout), relança para o retry tratar
       if (extractionError) {
         throw extractionError;
       }
 
-      // 6. Retorna a estrutura final de sucesso
+      if (metadata.titulo) {
+        console.log("Título encontrado");
+        console.log("↓");
+      }
+      if (metadata.imagem) {
+        console.log("Imagem encontrada");
+        console.log("↓");
+      }
+
+      console.log("Finalizado");
+      
+      const tempoTotalMs = Date.now() - startTotalTime;
+
+      logger.structured("extraction", "extraction_finished", {
+        marketplace,
+        produto_id: productIds.produto_id,
+        titulo: metadata.titulo
+      });
+
       return {
         success: true,
         marketplace,
         ...productIds,
         url_original: rawUrl,
-        url_encontrada: urlFinal,
+        url_encontrada: resolution.urlFinal,
         url_final: urlLimpa,
         titulo: metadata.titulo,
         imagem: metadata.imagem,
-        chain: redirectChain
+        preco: metadata.preco || null,
+        vendedor: metadata.vendedor || null,
+        avaliacao: metadata.avaliacao || null,
+        chain: resolution.chain,
+        metricas: {
+          tempoConexaoMs,
+          tempoResolucaoMs,
+          tempoExtracaoMs,
+          tempoTotalMs,
+          redirectsCount: resolution.estatisticas.redirectsHttp + resolution.estatisticas.redirectsJavascript
+        },
+        estatisticas: resolution.estatisticas
       };
 
     } finally {
-      // Liberação estrita de recursos localmente por tentativa
       if (page1) await BrowserManager.closePage(page1).catch(() => {});
       if (page2) await BrowserManager.closePage(page2).catch(() => {});
       if (context) await BrowserManager.closeContext(context).catch(() => {});

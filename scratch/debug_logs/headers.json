@@ -1,0 +1,14 @@
+{
+  "alt-svc": "h3=\":443\"; ma=86400",
+  "content-encoding": "gzip",
+  "content-type": "text/html",
+  "date": "Sun, 05 Jul 2026 00:21:37 GMT",
+  "server": "Server",
+  "strict-transport-security": "max-age=47474747; includeSubDomains; preload",
+  "vary": "Accept-Encoding,User-Agent",
+  "via": "1.1 f40717d6384fcee751adc32781c4c46c.cloudfront.net (CloudFront)",
+  "x-amz-cf-id": "HFaGlszqIShotneunypsK8P8g_EVYp4cedetOtCuafno3tD06IL3tg==",
+  "x-amz-cf-pop": "BOS50-P3",
+  "x-amz-rid": "QY3MV953MZHCQKA183SB",
+  "x-cache": "Miss from cloudfront"
+}

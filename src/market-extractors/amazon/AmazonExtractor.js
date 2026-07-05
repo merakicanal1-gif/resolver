@@ -1,50 +1,97 @@
 import BaseExtractor from "../base/BaseExtractor.js";
-import AmazonNormalizer from "./AmazonNormalizer.js";
 import NavigationManager from "../../core/navigation/NavigationManager.js";
 import logger from "../../utils/logger.js";
 
 class AmazonExtractor extends BaseExtractor {
-  async extract(page) {
-    logger.info("🕵️ Iniciando extração de dados da Amazon...");
+  constructor() {
+    super();
+    this.marketplace = "amazon";
+    this.supportedDomains = ["amazon.com.br", "amazon.com", "amzn.to"];
+  }
 
-    // Aguarda de forma inteligente até que o título do produto apareça (indica que a página de fato carregou e passou pelo CAPTCHA)
+  supports(url) {
+    try {
+      const hostname = new URL(url).hostname.toLowerCase();
+      return this.supportedDomains.some(domain => hostname.includes(domain));
+    } catch {
+      return false;
+    }
+  }
+
+  normalizeUrl(url) {
+    try {
+      const u = new URL(url);
+      u.search = "";
+      u.hash = "";
+
+      const dpMatch = u.pathname.match(/\/dp\/([A-Z0-9]{10})/i);
+      if (dpMatch) {
+        u.pathname = "/dp/" + dpMatch[1].toUpperCase();
+      }
+      return u.toString();
+    } catch {
+      return url;
+    }
+  }
+
+  extractProductId(url) {
+    try {
+      const u = new URL(url);
+      const dpMatch = u.pathname.match(/\/dp\/([A-Z0-9]{10})/i);
+      if (dpMatch) {
+        return {
+          marketplace: this.marketplace,
+          produto_id: dpMatch[1].toUpperCase()
+        };
+      }
+      return {
+        marketplace: this.marketplace,
+        produto_id: null
+      };
+    } catch {
+      return {
+        marketplace: this.marketplace,
+        produto_id: null
+      };
+    }
+  }
+
+  async extract(page, urlFinal) {
+    logger.info("🕵️ [AmazonExtractor] Iniciando extração de dados da Amazon...");
+
+    // Espera inteligente até que o título apareça
     const carregou = await NavigationManager.waitForSelector(page, "#productTitle", { timeout: 10000 });
     
     if (!carregou) {
-      logger.warn("⚠️ Título do produto (#productTitle) não apareceu na Amazon. Possível CAPTCHA ou página lenta.");
+      logger.warn("⚠️ [AmazonExtractor] Seletor #productTitle não apareceu na Amazon (possível CAPTCHA ou lentidão).");
     }
 
     let titulo = null;
     let imagem = null;
+    let preco = null;
+    let vendedor = null;
+    let avaliacao = null;
 
     try {
-      // 1. Extração do Título
+      // 1. Título
       titulo = await page.locator("#productTitle").textContent().catch(() => null);
-      if (titulo) {
-        titulo = titulo.trim();
-      }
+      if (titulo) titulo = titulo.trim();
 
-      // Fallback para og:title se o seletor principal falhar
+      // Fallback para og:title se falhar
       if (!titulo) {
         titulo = await page.locator('meta[property="og:title"]').getAttribute("content").catch(() => null);
-        if (titulo) {
-          titulo = titulo.trim();
-        }
+        if (titulo) titulo = titulo.trim();
       }
 
-      // Fallback para o título da tag <title>
+      // Fallback para tag <title>
       if (!titulo) {
         titulo = await page.title().catch(() => null);
-        if (titulo) {
-          titulo = titulo.trim();
-        }
+        if (titulo) titulo = titulo.trim();
       }
 
-      // 2. Extração da Imagem
-      // Tentativa 1: Atributo src direto do landingImage
+      // 2. Imagem
       imagem = await page.locator("#landingImage").getAttribute("src").catch(() => null);
 
-      // Tentativa 2: Extrair a imagem de maior resolução de "data-a-dynamic-image" (que é um JSON)
       if (imagem && (imagem.startsWith("data:") || imagem.includes("spinner"))) {
         const dynamicImageJson = await page.locator("#landingImage").getAttribute("data-a-dynamic-image").catch(() => null);
         if (dynamicImageJson) {
@@ -52,51 +99,78 @@ class AmazonExtractor extends BaseExtractor {
             const parsed = JSON.parse(dynamicImageJson);
             const urls = Object.keys(parsed);
             if (urls.length > 0) {
-              imagem = urls[urls.length - 1]; // Pega a última imagem que geralmente é a de maior resolução
+              imagem = urls[urls.length - 1]; // Maior resolução
             }
           } catch {
-            // Ignora erro de parser
+            // ignora parser
           }
         }
       }
 
-      // Tentativa 3: Seletor alternativo imgTagWrapperId img
       if (!imagem) {
         imagem = await page.locator("#imgTagWrapperId img").getAttribute("src").catch(() => null);
       }
 
-      // Tentativa 4: Meta tag og:image (geralmente contém a imagem de alta resolução do produto)
       if (!imagem || imagem.startsWith("data:")) {
         imagem = await page.locator('meta[property="og:image"]').getAttribute("content").catch(() => null);
       }
 
-      // Tentativa 5: Seletor de imagens secundárias se existirem
-      if (!imagem) {
-        imagem = await page.locator("#main-image-container img").first().getAttribute("src").catch(() => null);
+      if (imagem) imagem = imagem.trim();
+
+      // 3. Preço
+      // Tentamos o buybox interno ou qualquer seletor comum de preço do produto
+      preco = await page.locator(".a-price .a-offscreen").first().textContent().catch(() => null);
+      if (!preco) {
+        preco = await page.locator("#price_inside_buybox").textContent().catch(() => null);
+      }
+      if (!preco) {
+        preco = await page.locator("#priceblock_ourprice").textContent().catch(() => null);
+      }
+      if (preco) {
+        preco = preco.trim();
       }
 
-      if (imagem) {
-        imagem = imagem.trim();
+      // 4. Vendedor
+      vendedor = await page.locator("#merchant-info").textContent().catch(() => null);
+      if (vendedor) {
+        vendedor = vendedor.trim().replace(/\s+/g, " ");
       }
 
-      logger.info("✅ Extração da Amazon concluída", { titulo, imagem });
+      // 5. Avaliação
+      avaliacao = await page.locator("span.a-icon-alt").first().textContent().catch(() => null);
+      if (avaliacao) {
+        avaliacao = avaliacao.trim();
+      }
 
-      return {
+      const { produto_id } = this.extractProductId(urlFinal);
+      const urlLimpa = this.normalizeUrl(urlFinal);
+
+      const result = {
+        marketplace: this.marketplace,
+        produto_id,
         titulo,
-        imagem
+        imagem,
+        preco,
+        vendedor,
+        avaliacao,
+        url_final: urlLimpa
       };
+
+      logger.info(`✅ [AmazonExtractor] Extração concluída com sucesso`, { titulo, produto_id });
+      return result;
     } catch (error) {
-      logger.error("❌ Erro ao extrair dados do produto na Amazon:", error);
-      return { titulo: null, imagem: null };
+      logger.error("❌ [AmazonExtractor] Erro ao extrair dados na Amazon:", error);
+      return {
+        marketplace: this.marketplace,
+        produto_id: this.extractProductId(urlFinal).produto_id,
+        titulo: null,
+        imagem: null,
+        preco: null,
+        vendedor: null,
+        avaliacao: null,
+        url_final: this.normalizeUrl(urlFinal)
+      };
     }
-  }
-
-  normalizeUrl(url) {
-    return AmazonNormalizer.normalize(url);
-  }
-
-  extractProductId(url) {
-    return AmazonNormalizer.extractId(url);
   }
 }
 

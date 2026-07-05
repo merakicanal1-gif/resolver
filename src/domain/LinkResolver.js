@@ -4,88 +4,215 @@ class LinkResolver {
   /**
    * Resolve uma URL seguindo de forma totalmente agnóstica toda a cadeia de redirecionamentos (HTTP, JS, meta refresh).
    * Ele não conhece nenhum marketplace e apenas navega até que a URL pare de mudar (estabilize).
+   * 
    * @param {import('playwright').Page} page - A página do Playwright utilizada na resolução.
    * @param {string} initialUrl - A URL de entrada.
-   * @returns {Promise<{ urlFinal: string, chain: string[] }>} A URL final resolvida e a cadeia de redirecionamentos.
+   * @param {number} [timeoutGlobal=30000] - Timeout global de segurança em ms.
+   * @returns {Promise<{ chain: string[], urlOriginal: string, urlFinal: string, tempoResolucao: number, estatisticas: object }>}
    */
-  async resolve(page, initialUrl) {
-    logger.info(`🔗 Iniciando resolução de link 100% agnóstica para: ${initialUrl}`);
-    
-    const chain = [];
+  async resolve(page, initialUrl, timeoutGlobal = 30000) {
+    const startTime = Date.now();
+    logger.info(`[Resolver] Abrindo navegador...`);
+    logger.info(`[Resolver] Nova URL detectada: ${initialUrl}`);
 
-    // Registra cada navegação que altera a URL do frame principal
+    const chain = [initialUrl];
+    let redirectsHttp = 0;
+    let redirectsJavascript = 0;
+    let metaRefreshCount = 0;
+    let eventosCapturados = 0;
+
+    // Função auxiliar para registrar URLs na cadeia de forma deduplicada
+    const addToChain = (url) => {
+      if (!url || url === "about:blank") return;
+      const lastUrl = chain[chain.length - 1];
+      if (lastUrl !== url) {
+        chain.push(url);
+      }
+    };
+
+    let stabilityResolve = null;
+    let stabilityTimer = null;
+    let isStable = false;
+    let initialLoadComplete = false;
+
+    // Reseta o timer de estabilidade (750ms de silêncio)
+    const resetStabilityTimer = (reason, details = "") => {
+      eventosCapturados++;
+      
+      // Só começamos a contar a estabilização pós-carga inicial do page.goto
+      if (!initialLoadComplete || isStable) return;
+
+      if (stabilityTimer) {
+        clearTimeout(stabilityTimer);
+      }
+
+      const elapsed = Date.now() - startTime;
+      logger.info(`[Resolver] ${reason}${details ? ` (${details})` : ""} detectado → reiniciando estabilização [${elapsed}ms]`);
+
+      stabilityTimer = setTimeout(async () => {
+        // Antes de declarar estabilidade, verifica se há meta refresh no DOM
+        try {
+          const metaContent = await page.evaluate(() => {
+            const meta = document.querySelector('meta[http-equiv="refresh"i]');
+            return meta ? meta.getAttribute("content") : null;
+          }).catch(() => null);
+
+          if (metaContent) {
+            const match = metaContent.match(/^\s*(\d+)\s*;\s*url\s*=\s*(.+)$/i);
+            if (match) {
+              const delay = parseInt(match[1], 10);
+              const targetUrl = match[2].trim();
+              if (delay <= 5) {
+                metaRefreshCount++;
+                resetStabilityTimer("Meta Refresh", `delay: ${delay}s, destino: ${targetUrl}`);
+                return;
+              }
+            }
+          }
+        } catch (e) {
+          // Ignora se o contexto da página foi destruído ou inacessível momentaneamente
+        }
+
+        isStable = true;
+        if (stabilityResolve) {
+          stabilityResolve();
+        }
+      }, 750);
+    };
+
+    // 1. Expor a função para capturar eventos de navegação Javascript/History
+    await page.exposeFunction("__onNavigationEvent", (type, url) => {
+      if (type !== "init_script" && type !== "beforeunload") {
+        redirectsJavascript++;
+        addToChain(url);
+        resetStabilityTimer(`Redirect JavaScript [${type}]`, url);
+      }
+    });
+
+    // 2. Injetar scripts de escuta de rotas no navegador
+    await page.addInitScript(() => {
+      window.__onNavigationEvent("init_script", window.location.href);
+
+      // Hook pushState
+      const origPushState = window.history.pushState;
+      window.history.pushState = function(...args) {
+        const res = origPushState.apply(this, args);
+        window.__onNavigationEvent("pushState", window.location.href);
+        return res;
+      };
+
+      // Hook replaceState
+      const origReplaceState = window.history.replaceState;
+      window.history.replaceState = function(...args) {
+        const res = origReplaceState.apply(this, args);
+        window.__onNavigationEvent("replaceState", window.location.href);
+        return res;
+      };
+
+      // Listeners padrão do browser
+      window.addEventListener("hashchange", () => {
+        window.__onNavigationEvent("hashchange", window.location.href);
+      });
+
+      window.addEventListener("popstate", () => {
+        window.__onNavigationEvent("popstate", window.location.href);
+      });
+
+      window.addEventListener("beforeunload", () => {
+        window.__onNavigationEvent("beforeunload", window.location.href);
+      });
+    });
+
+    // 3. Listeners do Playwright (HTTP redirects e Frame Navigation)
     const onFrameNavigated = (frame) => {
       if (frame === page.mainFrame()) {
         const url = frame.url();
-        if (url && url !== "about:blank") {
-          if (chain.length === 0 || chain[chain.length - 1] !== url) {
-            logger.info(`📡 URL alterada na rede: ${url}`);
-            chain.push(url);
-          }
+        addToChain(url);
+        resetStabilityTimer("Nova requisição de documento (framenavigated)", url);
+      }
+    };
+
+    const onRequest = (req) => {
+      if (req.isNavigationRequest() && req.frame() === page.mainFrame()) {
+        const redirectedFrom = req.redirectedFrom();
+        if (redirectedFrom) {
+          redirectsHttp++;
+          addToChain(req.url());
+          resetStabilityTimer("Redirect HTTP", `${redirectedFrom.url()} -> ${req.url()}`);
         }
+      } else if (req.frame() === page.mainFrame() && (req.resourceType() === "xhr" || req.resourceType() === "fetch")) {
+        // Requisições XHR/Fetch de rede resetam o timer de silêncio de rede
+        resetStabilityTimer("Requisição de API (XHR/Fetch)", req.url().slice(0, 100));
       }
     };
 
     page.on("framenavigated", onFrameNavigated);
+    page.on("request", onRequest);
 
-    let currentUrl = initialUrl;
+    // Promise que resolve quando a navegação estabilizar por completo
+    const stabilityPromise = new Promise((resolve) => {
+      stabilityResolve = resolve;
+    });
+
+    // Promise de timeout global de segurança
+    let globalTimeoutTimer = null;
+    const timeoutPromise = new Promise((_, reject) => {
+      globalTimeoutTimer = setTimeout(() => {
+        reject(new Error("TIMEOUT_ESTABILIZACAO"));
+      }, timeoutGlobal);
+    });
 
     try {
-      // Primeira navegação na Aba 1.
-      // Usamos waitUntil: "domcontentloaded" para que scripts leves de redirect inicial rodem.
-      // Timeout seguro de 25 segundos para a cadeia inicial.
-      await page.goto(initialUrl, {
-        waitUntil: "domcontentloaded",
-        timeout: 25000
-      }).catch(err => {
-        logger.warn(`⚠️ Navegação inicial interrompida por timeout ou erro: ${err.message}. Analisando redirects ocorridos.`);
+      // Executa a carga inicial do page.goto
+      const elapsedStart = Date.now() - startTime;
+      logger.info(`[Resolver] Iniciando navegação inicial via page.goto [${elapsedStart}ms]`);
+      
+      await page.goto(initialUrl, { waitUntil: "domcontentloaded", timeout: timeoutGlobal }).catch(err => {
+        logger.warn(`[Resolver] Carga inicial do page.goto gerou erro/aviso: ${err.message}`);
       });
 
-      currentUrl = page.url();
+      // Marca a carga inicial como concluída e inicia o timer de estabilização pós-carga
+      initialLoadComplete = true;
+      resetStabilityTimer("Carga Inicial Concluída", page.url());
 
-      // Loop de estabilização: monitora se a cadeia de redirecionamentos (chain) parou de crescer.
-      // Se o tamanho da cadeia não aumentar por 3 segundos seguidos, a navegação é dada como estabilizada.
-      let lastChainLength = chain.length;
-      let stableSeconds = 0;
-      const maxCheckSeconds = 15;
+      // Aguarda a estabilização real completa ou timeout global
+      await Promise.race([stabilityPromise, timeoutPromise]);
 
-      for (let i = 0; i < maxCheckSeconds; i++) {
-        await page.waitForTimeout(1000);
-        const currentChainLength = chain.length;
-
-        if (currentChainLength === lastChainLength) {
-          stableSeconds++;
-          if (stableSeconds >= 3) {
-            logger.info(`⏹️ Cadeia de navegação estabilizou de forma agnóstica em: ${page.url()}`);
-            break;
-          }
-        } else {
-          stableSeconds = 0;
-          lastChainLength = currentChainLength;
-        }
+    } catch (err) {
+      if (err.message === "TIMEOUT_ESTABILIZACAO") {
+        logger.warn(`[Resolver] Timeout global de ${timeoutGlobal / 1000}s atingido. Retornando cadeia parcial.`);
+      } else {
+        logger.error(`[Resolver] Erro inesperado durante a resolução:`, err);
       }
-    } catch (error) {
-      logger.error("❌ Erro no resolvedor de links agnóstico:", error);
     } finally {
-      // Remove o listener para evitar memory leaks
+      // Limpeza de listeners e timers
       page.off("framenavigated", onFrameNavigated);
+      page.off("request", onRequest);
+      if (stabilityTimer) clearTimeout(stabilityTimer);
+      if (globalTimeoutTimer) clearTimeout(globalTimeoutTimer);
     }
 
-    // Garante que a URL inicial esteja no início da cadeia
-    if (chain.length === 0 || chain[0] !== initialUrl) {
-      chain.unshift(initialUrl);
-    }
+    // Adiciona a URL atual final obtida
+    const urlFinal = page.url();
+    addToChain(urlFinal);
 
-    // Adiciona a URL final obtida na cadeia caso ela não esteja listada no final
-    currentUrl = page.url();
-    if (currentUrl && currentUrl !== "about:blank" && chain[chain.length - 1] !== currentUrl) {
-      chain.push(currentUrl);
-    }
+    const tempoResolucao = Date.now() - startTime;
+    const estatisticas = {
+      redirectsHttp,
+      redirectsJavascript,
+      metaRefresh: metaRefreshCount,
+      eventosCapturados,
+      tempoEstabilizacao: tempoResolucao
+    };
 
-    logger.info(`🏁 Resolução agnóstica finalizada. URL final obtida: ${currentUrl}`);
+    logger.info(`[Resolver] Finalizado em ${tempoResolucao}ms. URL Final: ${urlFinal}`);
+
     return {
-      urlFinal: currentUrl,
-      chain
+      chain,
+      urlOriginal: initialUrl,
+      urlFinal,
+      tempoResolucao,
+      estatisticas
     };
   }
 }

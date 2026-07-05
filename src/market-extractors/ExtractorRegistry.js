@@ -1,32 +1,55 @@
-import GenericExtractor from "./base/GenericExtractor.js";
 import AmazonExtractor from "./amazon/AmazonExtractor.js";
 import MercadoLivreExtractor from "./mercadolivre/MercadoLivreExtractor.js";
 import ShopeeExtractor from "./shopee/ShopeeExtractor.js";
 
 class ExtractorRegistry {
   constructor() {
-    this._registry = new Map();
-    
-    // Registra os extratores para cada marketplace
-    this._registry.set("amazon", AmazonExtractor);
-    this._registry.set("mercadolivre", MercadoLivreExtractor);
-    this._registry.set("shopee", ShopeeExtractor);
+    this._extractors = [
+      {
+        marketplace: "amazon",
+        extractor: AmazonExtractor,
+        supportedDomains: AmazonExtractor.supportedDomains,
+        priority: 100
+      },
+      {
+        marketplace: "mercadolivre",
+        extractor: MercadoLivreExtractor,
+        supportedDomains: MercadoLivreExtractor.supportedDomains,
+        priority: 100
+      },
+      {
+        marketplace: "shopee",
+        extractor: ShopeeExtractor,
+        supportedDomains: ShopeeExtractor.supportedDomains,
+        priority: 100
+      }
+    ];
   }
 
   /**
-   * Retorna o extrator correspondente ao nome do marketplace.
-   * Se o marketplace for desconhecido, retorna o GenericExtractor como fallback.
-   * @param {string} marketplace - Nome do marketplace.
-   * @returns {import('./base/BaseExtractor').default} A instância do extrator.
+   * Encontra a definição do marketplace e do extrator correspondente à URL.
+   * @param {string} url - A URL do produto ou redirect.
+   * @returns {object|null} A definição cadastrada ou null.
    */
-  getExtractor(marketplace) {
-    const extractor = this._registry.get(marketplace);
-    if (extractor) {
-      return extractor;
+  find(url) {
+    if (!url) return null;
+    
+    // Procura o extrator que suporta a URL dada
+    for (const entry of this._extractors) {
+      if (entry.extractor.supports(url)) {
+        return entry;
+      }
     }
     
-    // Fallback para domínios genéricos
-    return GenericExtractor;
+    return null;
+  }
+
+  /**
+   * Retorna todos os extratores cadastrados.
+   * @returns {object[]}
+   */
+  list() {
+    return this._extractors;
   }
 }
 
