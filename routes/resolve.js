@@ -94,6 +94,19 @@ router.post("/v2", async (req, res) => {
         try {
             const resultado = await ResolveLinkUseCase.execute(url);
             
+            if (!resultado.success) {
+                let status = 400;
+                if (resultado.code === "BROWSER_CONNECTION_ERROR") {
+                    status = 503;
+                } else if (resultado.code === "INTERNAL_ERROR") {
+                    status = 500;
+                }
+                return res.status(status).json({
+                    ...resultado,
+                    tempo_ms: Date.now() - inicio
+                });
+            }
+
             res.json({
                 ...resultado,
                 tempo_ms: Date.now() - inicio

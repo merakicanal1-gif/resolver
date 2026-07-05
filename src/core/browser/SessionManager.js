@@ -61,6 +61,14 @@ class SessionManager {
       }
     }
   }
+
+  /**
+   * Descarta ativamente a conexão existente para forçar uma nova inicialização na próxima chamada.
+   */
+  async forceRecreate() {
+    console.warn("🔄 Forçando o descarte ativo e a recriação da conexão com o Browserless...");
+    await this.close();
+  }
 }
 
 // Exportamos uma única instância do SessionManager (Singleton) para gerenciar a conexão globalmente
