@@ -12,18 +12,18 @@ app.use(express.json());
 
 app.use("/resolve", resolveRoute);
 
-// ROTA TEMPORÁRIA DA ETAPA 1 (Acessível na raiz em GET /debug/chrome)
-app.get("/debug/chrome", async (req, res) => {
+// ROTA TEMPORÁRIA DA ETAPA 1 (Acessível na raiz em GET /debug/browser)
+app.get("/debug/browser", async (req, res) => {
   const inicio = Date.now();
   let browser = null;
   let context = null;
   let page = null;
 
   try {
-    // 1. Conectar ao Chrome utilizando CHROME_CDP_URL
+    // 1. Conectar ao Provedor Ativo
     browser = await BrowserManager.getBrowser();
     
-    // 2. Obter contexto persistente existente
+    // 2. Obter ou criar o contexto de navegação conforme capabilities
     context = await BrowserManager.createContext(browser);
     
     // 3. Abrir nova Page (aba)
@@ -72,11 +72,10 @@ app.get("/debug/chrome", async (req, res) => {
       elapsedMs: Date.now() - inicio
     });
   } finally {
-    // 9. Fechar apenas a aba criada
+    // 9. Fechar apenas a aba criada de forma segura via Lifecycle/Facade
     if (page) {
       await BrowserManager.closePage(page).catch(() => {});
     }
-    // NUNCA fecha browser ou contexto persistente do Chrome
   }
 });
 
